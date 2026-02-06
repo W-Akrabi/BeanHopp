@@ -274,6 +274,14 @@ class PaymentMethodSetupRequest(BaseModel):
     user_id: str
     email: Optional[str] = None
 
+class SavedPaymentChargeRequest(BaseModel):
+    amount: float
+    user_id: str
+    payment_method_id: str
+    order_id: Optional[str] = None
+    email: Optional[str] = None
+    purpose: str = "order"
+
 @api_router.get("/stripe/config")
 async def get_stripe_config():
     """Get Stripe publishable key for frontend"""
@@ -447,6 +455,70 @@ async def create_payment_method_setup_intent(request: PaymentMethodSetupRequest)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error creating payment method setup intent: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/stripe/pay-with-saved-method")
+async def pay_with_saved_method(request: SavedPaymentChargeRequest):
+    """Charge a user's saved card without showing card-entry PaymentSheet."""
+    try:
+        if request.amount <= 0:
+            raise HTTPException(status_code=400, detail="Amount must be greater than 0")
+
+        if not stripe.api_key:
+            raise HTTPException(status_code=503, detail="Stripe is not configured on the server")
+
+        amount_cents = int(round(request.amount * 100))
+        if amount_cents <= 0:
+            raise HTTPException(status_code=400, detail="Invalid amount")
+
+        customer = get_or_create_stripe_customer(request.user_id, email=request.email)
+        payment_method = stripe.PaymentMethod.retrieve(request.payment_method_id)
+        if payment_method.customer != customer.id:
+            raise HTTPException(status_code=400, detail="Selected payment method does not belong to user")
+
+        stripe.Customer.modify(
+            customer.id,
+            invoice_settings={"default_payment_method": request.payment_method_id}
+        )
+
+        metadata = {
+            "purpose": request.purpose,
+            "user_id": request.user_id,
+            "payment_method_id": request.payment_method_id,
+        }
+        if request.order_id:
+            metadata["order_id"] = request.order_id
+
+        payment_intent = stripe.PaymentIntent.create(
+            amount=amount_cents,
+            currency="cad",
+            customer=customer.id,
+            payment_method=request.payment_method_id,
+            confirm=True,
+            off_session=True,
+            metadata=metadata,
+        )
+
+        if payment_intent.status != "succeeded":
+            raise HTTPException(status_code=400, detail=f"Payment not completed: {payment_intent.status}")
+
+        return {
+            "success": True,
+            "paymentIntentId": payment_intent.id,
+            "status": payment_intent.status,
+            "amount": amount_cents,
+            "currency": payment_intent.currency,
+        }
+    except HTTPException:
+        raise
+    except stripe.error.CardError as e:
+        logger.error(f"Card error charging saved method: {e}")
+        raise HTTPException(status_code=402, detail=getattr(e, "user_message", str(e)))
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error charging saved method: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error charging saved payment method: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ------------ Orders ------------
@@ -1248,7 +1320,15 @@ async def search(q: str, limit: int = 20):
                 score += 30
             
             if score > 0:
-                scored_items.append({**item, '_score': score})
+                normalized_price = item.get('price')
+                if normalized_price is None:
+                    normalized_price = item.get('base_price')
+
+                scored_items.append({
+                    **item,
+                    'price': normalized_price,
+                    '_score': score
+                })
         
         scored_items.sort(key=lambda x: x['_score'], reverse=True)
         results['menu_items'] = scored_items[:limit]

@@ -7,6 +7,8 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   RefreshControl,
+  Alert,
+  Linking,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -14,6 +16,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { Button } from '../../src/components';
 import { COLORS, FONTS, SPACING, RADIUS, SHADOWS } from '../../src/constants/theme';
 import api from '../../src/lib/api';
+
+const SUPPORT_EMAIL = 'support@beanhop.ca';
+const SUPPORT_PHONE = '+14165550199';
 
 interface Order {
   id: string;
@@ -139,6 +144,47 @@ export default function OrderDetail() {
     }
   };
 
+  const openSupportEmail = async () => {
+    if (!order) return;
+
+    const subject = encodeURIComponent(`Order Support: ${order.order_number}`);
+    const body = encodeURIComponent(
+      `Hi BeanHop Support,\n\nI need help with order ${order.order_number}.\nShop: ${order.shop_name}\nStatus: ${order.status}\n\nPlease assist.\n`
+    );
+    const url = `mailto:${SUPPORT_EMAIL}?subject=${subject}&body=${body}`;
+
+    const canOpen = await Linking.canOpenURL(url);
+    if (!canOpen) {
+      Alert.alert('Unable to Open Email', `Please contact us at ${SUPPORT_EMAIL}`);
+      return;
+    }
+    await Linking.openURL(url);
+  };
+
+  const openSupportPhone = async () => {
+    const url = `tel:${SUPPORT_PHONE}`;
+    const canOpen = await Linking.canOpenURL(url);
+    if (!canOpen) {
+      Alert.alert('Unable to Call', `Please call us at ${SUPPORT_PHONE}`);
+      return;
+    }
+    await Linking.openURL(url);
+  };
+
+  const handleHelpPress = () => {
+    if (!order) return;
+
+    Alert.alert(
+      'Need Help?',
+      `How would you like to contact support for ${order.order_number}?`,
+      [
+        { text: 'Email Support', onPress: () => { void openSupportEmail(); } },
+        { text: 'Call Support', onPress: () => { void openSupportPhone(); } },
+        { text: 'Cancel', style: 'cancel' },
+      ]
+    );
+  };
+
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
@@ -173,7 +219,7 @@ export default function OrderDetail() {
             <Ionicons name="arrow-back" size={24} color={COLORS.darkNavy} />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Order Status</Text>
-          <TouchableOpacity style={styles.helpButton}>
+          <TouchableOpacity style={styles.helpButton} onPress={handleHelpPress}>
             <Ionicons name="help-circle-outline" size={24} color={COLORS.darkNavy} />
           </TouchableOpacity>
         </View>
@@ -349,7 +395,7 @@ export default function OrderDetail() {
           ) : (
             <Button
               title="Need Help?"
-              onPress={() => console.log('Help')}
+              onPress={handleHelpPress}
               variant="outline"
               size="large"
               style={styles.actionButton}

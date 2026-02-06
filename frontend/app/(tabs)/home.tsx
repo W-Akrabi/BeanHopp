@@ -13,7 +13,7 @@ import {
   FlatList,
   Animated,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { Card } from '../../src/components';
@@ -44,7 +44,8 @@ interface MenuItem {
   id: string;
   name: string;
   description?: string;
-  price: number;
+  price?: number | string | null;
+  base_price?: number | string | null;
   category: string;
   shop_id: string;
   shops?: { name: string };
@@ -121,6 +122,7 @@ const defaultPromos: Promo[] = [
 
 export default function Home() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const user = useAuthStore((state) => state.user);
   const { 
     notifications, 
@@ -398,6 +400,18 @@ export default function Home() {
     return `${Math.floor(seconds / 86400)}d ago`;
   };
 
+  const formatMenuItemPrice = (item: MenuItem): string => {
+    const rawPrice = item.price ?? item.base_price;
+    const numericPrice =
+      typeof rawPrice === 'string' ? Number.parseFloat(rawPrice) : rawPrice;
+
+    if (typeof numericPrice !== 'number' || Number.isNaN(numericPrice)) {
+      return '--';
+    }
+
+    return `$${numericPrice.toFixed(2)}`;
+  };
+
   const renderShopCard = ({ item }: { item: Shop }) => (
     <TouchableOpacity
       style={styles.shopCard}
@@ -443,7 +457,15 @@ export default function Home() {
       onRequestClose={() => setShowSearch(false)}
     >
       <SafeAreaView style={styles.modalContainer}>
-        <View style={styles.searchHeader}>
+        <View
+          style={[
+            styles.searchHeader,
+            {
+              paddingTop: insets.top + SPACING.sm,
+              paddingBottom: SPACING.sm,
+            },
+          ]}
+        >
           <TouchableOpacity onPress={() => setShowSearch(false)}>
             <Ionicons name="arrow-back" size={24} color={COLORS.darkNavy} />
           </TouchableOpacity>
@@ -527,7 +549,7 @@ export default function Home() {
                       <Text style={styles.menuItemName}>{item.name}</Text>
                       <Text style={styles.menuItemShop}>{item.shops?.name || 'Coffee Shop'}</Text>
                     </View>
-                    <Text style={styles.menuItemPrice}>${item.price.toFixed(2)}</Text>
+                    <Text style={styles.menuItemPrice}>{formatMenuItemPrice(item)}</Text>
                   </TouchableOpacity>
                 ))}
               </View>
@@ -572,7 +594,15 @@ export default function Home() {
       onRequestClose={() => setShowNotifications(false)}
     >
       <SafeAreaView style={styles.modalContainer}>
-        <View style={styles.notifHeader}>
+        <View
+          style={[
+            styles.notifHeader,
+            {
+              paddingTop: insets.top + SPACING.sm,
+              paddingBottom: SPACING.md,
+            },
+          ]}
+        >
           <TouchableOpacity onPress={() => setShowNotifications(false)}>
             <Ionicons name="arrow-back" size={24} color={COLORS.darkNavy} />
           </TouchableOpacity>
