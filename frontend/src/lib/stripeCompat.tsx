@@ -36,9 +36,11 @@ export function getStripeModule(): StripeModule | null {
 
 export function StripeRootProvider({
   publishableKey,
+  merchantIdentifier,
   children,
 }: {
   publishableKey: string;
+  merchantIdentifier?: string;
   children: React.ReactNode;
 }) {
   const stripeModule = getStripeModule();
@@ -48,7 +50,11 @@ export function StripeRootProvider({
   }
 
   const Provider = stripeModule.StripeProvider;
-  return <Provider publishableKey={publishableKey}>{<>{children}</>}</Provider>;
+  return (
+    <Provider publishableKey={publishableKey} merchantIdentifier={merchantIdentifier}>
+      {<>{children}</>}
+    </Provider>
+  );
 }
 
 export function useOptionalStripe() {

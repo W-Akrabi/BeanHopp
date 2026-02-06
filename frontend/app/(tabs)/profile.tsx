@@ -69,6 +69,7 @@ export default function Profile() {
   const [selectedTopUpAmount, setSelectedTopUpAmount] = useState<number | null>(null);
   const [customAmount, setCustomAmount] = useState('');
   const [loading, setLoading] = useState(false);
+  const applePayMerchantIdentifier = process.env.EXPO_PUBLIC_APPLE_PAY_MERCHANT_ID || '';
 
   useEffect(() => {
     if (user) {
@@ -119,6 +120,18 @@ export default function Profile() {
     }
   };
 
+  const getPaymentSheetBaseConfig = () => ({
+    merchantDisplayName: 'BeanHop',
+    allowsDelayedPaymentMethods: false,
+    returnURL: 'beanhop://stripe-redirect',
+    applePay: Platform.OS === 'ios' && applePayMerchantIdentifier
+      ? { merchantCountryCode: 'CA' }
+      : undefined,
+    googlePay: Platform.OS === 'android'
+      ? { merchantCountryCode: 'CA', testEnv: __DEV__ }
+      : undefined,
+  });
+
   const handleAddPaymentMethod = async () => {
     if (!user?.id) {
       Alert.alert('Sign In Required', 'Please sign in to add payment methods');
@@ -144,10 +157,8 @@ export default function Profile() {
 
       const { clientSecret } = response.data;
       const initResult = await initPaymentSheet({
-        merchantDisplayName: 'BeanHop',
+        ...getPaymentSheetBaseConfig(),
         setupIntentClientSecret: clientSecret,
-        allowsDelayedPaymentMethods: false,
-        returnURL: 'beanhop://stripe-redirect',
       });
 
       if (initResult.error) {
@@ -209,10 +220,8 @@ export default function Profile() {
       const { clientSecret, paymentIntentId } = intentResponse.data;
 
       const initResult = await initPaymentSheet({
-        merchantDisplayName: 'BeanHop',
+        ...getPaymentSheetBaseConfig(),
         paymentIntentClientSecret: clientSecret,
-        allowsDelayedPaymentMethods: false,
-        returnURL: 'beanhop://stripe-redirect',
       });
 
       if (initResult.error) {
@@ -560,13 +569,6 @@ export default function Profile() {
             onPress={handleAddPaymentMethod}
             disabled={addingPaymentMethod}
             style={styles.addPaymentButton}
-          />
-
-          <Button
-            title="Refresh"
-            onPress={fetchPaymentMethods}
-            disabled={paymentsLoading || addingPaymentMethod}
-            style={styles.confirmButton}
           />
         </View>
       </View>

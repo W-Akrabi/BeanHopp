@@ -50,6 +50,7 @@ export default function Checkout() {
   const [saveNewPaymentMethod, setSaveNewPaymentMethod] = useState(true);
 
   const total = getTotal();
+  const applePayMerchantIdentifier = process.env.EXPO_PUBLIC_APPLE_PAY_MERCHANT_ID || '';
   const canUseWallet = walletBalance >= total;
   const selectedSavedMethod = savedPaymentMethods.find((pm) => pm.id === selectedSavedMethodId) || null;
 
@@ -94,6 +95,18 @@ export default function Checkout() {
     }
   };
 
+  const getPaymentSheetBaseConfig = () => ({
+    merchantDisplayName: 'BeanHop',
+    allowsDelayedPaymentMethods: false,
+    returnURL: 'beanhop://stripe-redirect',
+    applePay: Platform.OS === 'ios' && applePayMerchantIdentifier
+      ? { merchantCountryCode: 'CA' }
+      : undefined,
+    googlePay: Platform.OS === 'android'
+      ? { merchantCountryCode: 'CA', testEnv: __DEV__ }
+      : undefined,
+  });
+
   const handlePlaceOrder = async () => {
     if (!user) {
       Alert.alert('Sign In Required', 'Please sign in to place an order', [
@@ -118,8 +131,8 @@ export default function Checkout() {
       return;
     }
 
-    const usingCardPayment = selectedPaymentType === 'saved' || selectedPaymentType === 'new';
-    if (usingCardPayment) {
+    const usingNewCardPayment = selectedPaymentType === 'new';
+    if (usingNewCardPayment) {
       if (Platform.OS === 'web') {
         Alert.alert('Unsupported', 'Checkout payment is available on iOS/Android only.');
         return;
@@ -170,6 +183,20 @@ export default function Checkout() {
         await api.patch(`/orders/${order.id}/status?status=confirmed`);
         orderConfirmed = true;
         setWalletBalance((prev) => Math.max(0, prev - total));
+      } else if (selectedPaymentType === 'saved' && selectedSavedMethodId) {
+        const savedPaymentResponse = await api.post('/stripe/pay-with-saved-method', {
+          amount: total,
+          order_id: order.id,
+          user_id: user.id,
+          email: user.email,
+          payment_method_id: selectedSavedMethodId,
+          purpose: 'order',
+        });
+
+        const { paymentIntentId } = savedPaymentResponse.data;
+        await api.post(`/stripe/confirm-payment?payment_intent_id=${paymentIntentId}&order_id=${order.id}`);
+        orderConfirmed = true;
+        await fetchPaymentContext();
       } else {
         // Step 2: Create payment intent for this order
         const paymentResponse = await api.post('/stripe/create-payment-intent', {
@@ -186,10 +213,8 @@ export default function Checkout() {
 
         // Step 3: Complete payment
         const initResult = await initPaymentSheet({
-          merchantDisplayName: 'BeanHop',
+          ...getPaymentSheetBaseConfig(),
           paymentIntentClientSecret: clientSecret,
-          allowsDelayedPaymentMethods: false,
-          returnURL: 'beanhop://stripe-redirect',
         });
 
         if (initResult.error) {

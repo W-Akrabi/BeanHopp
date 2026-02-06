@@ -8,13 +8,17 @@ import { StripeRootProvider } from '../src/lib/stripeCompat';
 export default function RootLayout() {
   const initialize = useAuthStore((state) => state.initialize);
   const stripePublishableKey = process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY || '';
+  const applePayMerchantIdentifier = process.env.EXPO_PUBLIC_APPLE_PAY_MERCHANT_ID || '';
 
   useEffect(() => {
     initialize();
   }, []);
 
   return (
-    <StripeRootProvider publishableKey={stripePublishableKey}>
+    <StripeRootProvider
+      publishableKey={stripePublishableKey}
+      merchantIdentifier={applePayMerchantIdentifier || undefined}
+    >
       <StatusBar style="dark" />
       <Stack
         screenOptions={{
