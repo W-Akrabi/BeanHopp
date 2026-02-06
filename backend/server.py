@@ -2,6 +2,8 @@ from fastapi import FastAPI, APIRouter, HTTPException
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
+import base64
+import json
 import os
 import logging
 from pathlib import Path
@@ -14,10 +16,39 @@ import stripe
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+def get_jwt_role(token: str) -> Optional[str]:
+    """Decode JWT payload without verification to inspect the role claim."""
+    try:
+        payload_b64 = token.split('.')[1]
+        padding = '=' * (-len(payload_b64) % 4)
+        payload_json = base64.urlsafe_b64decode(payload_b64 + padding).decode('utf-8')
+        payload = json.loads(payload_json)
+        return payload.get('role')
+    except Exception:
+        return None
+
 # Supabase connection
 supabase_url = os.environ.get('SUPABASE_URL', '')
-supabase_key = os.environ.get('SUPABASE_KEY', '')
+supabase_service_role_key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
+supabase_legacy_key = os.environ.get('SUPABASE_KEY', '')
+supabase_key = supabase_service_role_key or supabase_legacy_key
 supabase: Client = create_client(supabase_url, supabase_key)
+
+if not supabase_service_role_key:
+    logger.warning("SUPABASE_SERVICE_ROLE_KEY is not set. Falling back to SUPABASE_KEY.")
+
+supabase_key_role = get_jwt_role(supabase_key) if supabase_key else None
+if supabase_key_role == 'anon':
+    logger.warning(
+        "Backend Supabase key role is 'anon'. RLS-protected writes (e.g., wallets inserts/updates) may fail."
+    )
 
 # Stripe configuration
 stripe.api_key = os.environ.get('STRIPE_SECRET_KEY', '')
@@ -28,13 +59,6 @@ app = FastAPI(title="BeanHop API", version="1.0.0")
 
 # Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # ============== Models ==============
 
@@ -95,6 +119,55 @@ def calculate_loyalty_level(points: int) -> str:
 
 def generate_order_number() -> str:
     return f"ORD-{uuid.uuid4().hex[:6].upper()}"
+
+def find_stripe_customer(user_id: str, email: Optional[str] = None):
+    """Find an existing Stripe customer for this app user."""
+    if not stripe.api_key:
+        return None
+
+    # Prefer metadata lookup by app user id.
+    try:
+        search_result = stripe.Customer.search(
+            query=f"metadata['user_id']:'{user_id}'",
+            limit=1
+        )
+        if search_result.data:
+            return search_result.data[0]
+    except Exception as e:
+        logger.warning(f"Stripe customer search unavailable, falling back to email lookup: {e}")
+
+    if email:
+        try:
+            customers = stripe.Customer.list(email=email, limit=10)
+            for customer in customers.data:
+                metadata = customer.get('metadata') or {}
+                if metadata.get('user_id') == user_id:
+                    return customer
+        except Exception as e:
+            logger.warning(f"Stripe customer email lookup failed: {e}")
+    else:
+        # Fallback for environments where Customer.search is unavailable.
+        try:
+            customers = stripe.Customer.list(limit=100)
+            for customer in customers.data:
+                metadata = customer.get('metadata') or {}
+                if metadata.get('user_id') == user_id:
+                    return customer
+        except Exception as e:
+            logger.warning(f"Stripe customer list fallback failed: {e}")
+
+    return None
+
+def get_or_create_stripe_customer(user_id: str, email: Optional[str] = None):
+    """Get a Stripe customer for the user, creating one if missing."""
+    customer = find_stripe_customer(user_id, email=email)
+    if customer:
+        return customer
+
+    return stripe.Customer.create(
+        email=email,
+        metadata={"user_id": user_id}
+    )
 
 # ============== API Routes ==============
 
@@ -191,6 +264,10 @@ async def create_menu_item(item_data: MenuItemCreate):
 class PaymentIntentRequest(BaseModel):
     amount: float  # Amount in dollars
     order_id: Optional[str] = None
+    user_id: Optional[str] = None
+    email: Optional[str] = None
+    purpose: str = "order"
+    save_payment_method: bool = True
 
 @api_router.get("/stripe/config")
 async def get_stripe_config():
@@ -201,35 +278,47 @@ async def get_stripe_config():
 async def create_payment_intent(request: PaymentIntentRequest):
     """Create a Stripe PaymentIntent"""
     try:
+        if request.amount <= 0:
+            raise HTTPException(status_code=400, detail="Amount must be greater than 0")
+
         # Convert dollars to cents
-        amount_cents = int(request.amount * 100)
+        amount_cents = int(round(request.amount * 100))
         
-        # Check if Stripe secret key is configured
         if not stripe.api_key:
-            # Return mock payment intent for testing without secret key
-            logger.warning("Stripe secret key not configured, using mock payment intent")
-            return {
-                "clientSecret": "mock_client_secret_for_testing",
-                "paymentIntentId": f"pi_mock_{uuid.uuid4().hex[:16]}",
-                "amount": amount_cents,
-                "currency": "cad",
-                "mock": True
-            }
+            raise HTTPException(status_code=503, detail="Stripe is not configured on the server")
         
+        metadata = {
+            "purpose": request.purpose,
+        }
+        if request.order_id:
+            metadata["order_id"] = request.order_id
+        if request.user_id:
+            metadata["user_id"] = request.user_id
+
+        payment_intent_params: Dict[str, Any] = {
+            "amount": amount_cents,
+            "currency": "cad",
+            "automatic_payment_methods": {"enabled": True},
+            "metadata": metadata,
+        }
+
+        customer_id = None
+        if request.user_id:
+            customer = get_or_create_stripe_customer(request.user_id, email=request.email)
+            customer_id = customer.id
+            payment_intent_params["customer"] = customer_id
+            if request.save_payment_method:
+                payment_intent_params["setup_future_usage"] = "off_session"
+
         # Create real payment intent
-        payment_intent = stripe.PaymentIntent.create(
-            amount=amount_cents,
-            currency="cad",
-            automatic_payment_methods={"enabled": True},
-            metadata={"order_id": request.order_id} if request.order_id else {}
-        )
+        payment_intent = stripe.PaymentIntent.create(**payment_intent_params)
         
         return {
             "clientSecret": payment_intent.client_secret,
             "paymentIntentId": payment_intent.id,
             "amount": amount_cents,
             "currency": "cad",
-            "mock": False
+            "customerId": customer_id,
         }
     except stripe.error.StripeError as e:
         logger.error(f"Stripe error: {e}")
@@ -242,6 +331,21 @@ async def create_payment_intent(request: PaymentIntentRequest):
 async def confirm_payment(payment_intent_id: str, order_id: str):
     """Confirm payment was successful and update order"""
     try:
+        if stripe.api_key:
+            payment_intent = stripe.PaymentIntent.retrieve(payment_intent_id)
+            if payment_intent.status != 'succeeded':
+                raise HTTPException(status_code=400, detail="Payment is not completed")
+
+            metadata_order_id = (payment_intent.metadata or {}).get('order_id')
+            if metadata_order_id and metadata_order_id != order_id:
+                raise HTTPException(status_code=400, detail="Payment intent does not match order")
+
+            if payment_intent.customer and payment_intent.payment_method:
+                stripe.Customer.modify(
+                    payment_intent.customer,
+                    invoice_settings={"default_payment_method": payment_intent.payment_method}
+                )
+
         # Update order with payment info and status
         response = supabase.table('orders').update({
             'stripe_payment_id': payment_intent_id,
@@ -253,8 +357,52 @@ async def confirm_payment(payment_intent_id: str, order_id: str):
             raise HTTPException(status_code=404, detail="Order not found")
         
         return {"success": True, "order": response.data[0]}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error confirming payment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.get("/payments/methods/{user_id}")
+async def get_saved_payment_methods(user_id: str, email: Optional[str] = None):
+    """Get user's saved card payment methods from Stripe."""
+    try:
+        if not stripe.api_key:
+            return {"customer_id": None, "payment_methods": []}
+
+        customer = find_stripe_customer(user_id, email=email)
+        if not customer:
+            return {"customer_id": None, "payment_methods": []}
+
+        customer_id = customer.id
+        default_payment_method_id = (customer.get('invoice_settings') or {}).get('default_payment_method')
+        payment_methods = stripe.PaymentMethod.list(
+            customer=customer_id,
+            type='card',
+            limit=20
+        )
+
+        results = []
+        for payment_method in payment_methods.data:
+            card = payment_method.get('card') or {}
+            results.append({
+                "id": payment_method.id,
+                "brand": card.get('brand'),
+                "last4": card.get('last4'),
+                "exp_month": card.get('exp_month'),
+                "exp_year": card.get('exp_year'),
+                "is_default": payment_method.id == default_payment_method_id,
+            })
+
+        return {
+            "customer_id": customer_id,
+            "payment_methods": results,
+        }
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error fetching payment methods: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error fetching payment methods: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ------------ Orders ------------
@@ -385,6 +533,12 @@ async def get_loyalty_transactions(user_id: str, limit: int = 50):
 class WalletTopUpRequest(BaseModel):
     user_id: str
     amount: float
+    payment_intent_id: str
+
+class WalletTopUpIntentRequest(BaseModel):
+    user_id: str
+    amount: float
+    email: Optional[str] = None
 
 class RedeemRewardRequest(BaseModel):
     user_id: str
@@ -423,10 +577,97 @@ async def get_wallet(user_id: str):
         logger.error(f"Error fetching wallet: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@api_router.post("/wallet/topup/create-payment-intent")
+async def create_wallet_topup_payment_intent(request: WalletTopUpIntentRequest):
+    """Create a Stripe PaymentIntent for wallet top-up."""
+    try:
+        if request.amount <= 0:
+            raise HTTPException(status_code=400, detail="Amount must be greater than 0")
+
+        if not stripe.api_key:
+            raise HTTPException(status_code=503, detail="Stripe is not configured on the server")
+
+        amount_cents = int(round(request.amount * 100))
+        if amount_cents <= 0:
+            raise HTTPException(status_code=400, detail="Invalid top-up amount")
+
+        customer = get_or_create_stripe_customer(request.user_id, email=request.email)
+
+        payment_intent = stripe.PaymentIntent.create(
+            amount=amount_cents,
+            currency="cad",
+            automatic_payment_methods={"enabled": True},
+            customer=customer.id,
+            setup_future_usage="off_session",
+            metadata={
+                "purpose": "wallet_topup",
+                "user_id": request.user_id,
+                "amount_cents": str(amount_cents),
+            },
+        )
+
+        return {
+            "clientSecret": payment_intent.client_secret,
+            "paymentIntentId": payment_intent.id,
+            "amount": amount_cents,
+            "currency": "cad",
+            "customerId": customer.id,
+        }
+    except HTTPException:
+        raise
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error creating wallet top-up intent: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating wallet top-up intent: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @api_router.post("/wallet/topup")
 async def topup_wallet(request: WalletTopUpRequest):
-    """Add funds to wallet"""
+    """Add funds to wallet after verifying Stripe payment success."""
     try:
+        if request.amount <= 0:
+            raise HTTPException(status_code=400, detail="Amount must be greater than 0")
+
+        if not stripe.api_key:
+            raise HTTPException(status_code=503, detail="Stripe is not configured on the server")
+
+        # Ensure this payment intent hasn't already been applied to wallet
+        existing_tx = (
+            supabase.table('wallet_transactions')
+            .select('id')
+            .eq('payment_intent_id', request.payment_intent_id)
+            .limit(1)
+            .execute()
+        )
+        if existing_tx.data:
+            raise HTTPException(status_code=409, detail="This payment has already been applied")
+
+        payment_intent = stripe.PaymentIntent.retrieve(request.payment_intent_id)
+        if payment_intent.status != 'succeeded':
+            raise HTTPException(status_code=400, detail="Payment is not completed")
+
+        if payment_intent.currency != 'cad':
+            raise HTTPException(status_code=400, detail="Unsupported payment currency")
+
+        metadata_user_id = (payment_intent.metadata or {}).get('user_id')
+        metadata_purpose = (payment_intent.metadata or {}).get('purpose')
+        if metadata_purpose != 'wallet_topup' or metadata_user_id != request.user_id:
+            raise HTTPException(status_code=400, detail="Payment intent does not match this wallet top-up")
+
+        expected_cents = int(round(request.amount * 100))
+        received_cents = int(payment_intent.amount_received or payment_intent.amount or 0)
+        if received_cents != expected_cents:
+            raise HTTPException(status_code=400, detail="Payment amount mismatch")
+
+        topup_amount = received_cents / 100.0
+
+        if payment_intent.customer and payment_intent.payment_method:
+            stripe.Customer.modify(
+                payment_intent.customer,
+                invoice_settings={"default_payment_method": payment_intent.payment_method}
+            )
+
         # Get or create wallet
         wallet_response = supabase.table('wallets').select('*').eq('user_id', request.user_id).execute()
         
@@ -434,15 +675,15 @@ async def topup_wallet(request: WalletTopUpRequest):
             new_wallet = {
                 'id': str(uuid.uuid4()),
                 'user_id': request.user_id,
-                'balance': request.amount,
+                'balance': topup_amount,
                 'created_at': datetime.utcnow().isoformat(),
                 'updated_at': datetime.utcnow().isoformat()
             }
             supabase.table('wallets').insert(new_wallet).execute()
-            new_balance = request.amount
+            new_balance = topup_amount
         else:
             wallet = wallet_response.data[0]
-            new_balance = wallet['balance'] + request.amount
+            new_balance = wallet['balance'] + topup_amount
             supabase.table('wallets').update({
                 'balance': new_balance,
                 'updated_at': datetime.utcnow().isoformat()
@@ -452,9 +693,10 @@ async def topup_wallet(request: WalletTopUpRequest):
         tx = {
             'id': str(uuid.uuid4()),
             'user_id': request.user_id,
-            'amount': request.amount,
+            'amount': topup_amount,
             'type': 'topup',
-            'description': f'Added ${request.amount:.2f} to wallet',
+            'description': f'Added ${topup_amount:.2f} to wallet',
+            'payment_intent_id': request.payment_intent_id,
             'created_at': datetime.utcnow().isoformat()
         }
         supabase.table('wallet_transactions').insert(tx).execute()
@@ -462,8 +704,14 @@ async def topup_wallet(request: WalletTopUpRequest):
         return {
             "success": True,
             "new_balance": new_balance,
-            "transaction_id": tx['id']
+            "transaction_id": tx['id'],
+            "payment_intent_id": request.payment_intent_id
         }
+    except HTTPException:
+        raise
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error topping up wallet: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error topping up wallet: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1051,10 +1299,78 @@ CREATE TABLE IF NOT EXISTS loyalty_transactions (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Wallets table
+CREATE TABLE IF NOT EXISTS wallets (
+    id TEXT PRIMARY KEY,
+    user_id TEXT UNIQUE NOT NULL,
+    balance DECIMAL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Wallet transactions table
+CREATE TABLE IF NOT EXISTS wallet_transactions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    amount DECIMAL NOT NULL,
+    type TEXT NOT NULL,
+    description TEXT,
+    payment_intent_id TEXT,
+    order_id TEXT REFERENCES orders(id),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS payment_intent_id TEXT;
+
 -- Create indexes
 CREATE INDEX IF NOT EXISTS idx_menu_items_shop_id ON menu_items(shop_id);
 CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_loyalty_user_id ON loyalty_transactions(user_id);
+CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets(user_id);
+CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user_id ON wallet_transactions(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wallet_tx_payment_intent_id
+ON wallet_transactions(payment_intent_id)
+WHERE payment_intent_id IS NOT NULL;
+
+-- Wallet RLS policies
+ALTER TABLE wallets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE wallet_transactions ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "wallets_select_own" ON wallets;
+CREATE POLICY "wallets_select_own"
+ON wallets
+FOR SELECT
+TO authenticated
+USING (auth.uid()::TEXT = user_id);
+
+DROP POLICY IF EXISTS "wallets_insert_own" ON wallets;
+CREATE POLICY "wallets_insert_own"
+ON wallets
+FOR INSERT
+TO authenticated
+WITH CHECK (auth.uid()::TEXT = user_id);
+
+DROP POLICY IF EXISTS "wallets_update_own" ON wallets;
+CREATE POLICY "wallets_update_own"
+ON wallets
+FOR UPDATE
+TO authenticated
+USING (auth.uid()::TEXT = user_id)
+WITH CHECK (auth.uid()::TEXT = user_id);
+
+DROP POLICY IF EXISTS "wallet_tx_select_own" ON wallet_transactions;
+CREATE POLICY "wallet_tx_select_own"
+ON wallet_transactions
+FOR SELECT
+TO authenticated
+USING (auth.uid()::TEXT = user_id);
+
+DROP POLICY IF EXISTS "wallet_tx_insert_own" ON wallet_transactions;
+CREATE POLICY "wallet_tx_insert_own"
+ON wallet_transactions
+FOR INSERT
+TO authenticated
+WITH CHECK (auth.uid()::TEXT = user_id);
 """
     return {
         "message": "Copy and run this SQL in your Supabase SQL Editor",

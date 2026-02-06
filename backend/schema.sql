@@ -104,6 +104,29 @@ CREATE TABLE IF NOT EXISTS reviews (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Wallets table
+CREATE TABLE IF NOT EXISTS wallets (
+    id TEXT PRIMARY KEY,
+    user_id TEXT UNIQUE NOT NULL,
+    balance DECIMAL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Wallet transactions table
+CREATE TABLE IF NOT EXISTS wallet_transactions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    amount DECIMAL NOT NULL,
+    type TEXT NOT NULL,
+    description TEXT,
+    payment_intent_id TEXT,
+    order_id TEXT REFERENCES orders(id),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS payment_intent_id TEXT;
+
 -- Create indexes for better query performance
 CREATE INDEX IF NOT EXISTS idx_menu_items_shop_id ON menu_items(shop_id);
 CREATE INDEX IF NOT EXISTS idx_menu_items_category ON menu_items(category);
@@ -111,9 +134,53 @@ CREATE INDEX IF NOT EXISTS idx_orders_user_id ON orders(user_id);
 CREATE INDEX IF NOT EXISTS idx_orders_shop_id ON orders(shop_id);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_loyalty_user_id ON loyalty_transactions(user_id);
+CREATE INDEX IF NOT EXISTS idx_wallets_user_id ON wallets(user_id);
+CREATE INDEX IF NOT EXISTS idx_wallet_transactions_user_id ON wallet_transactions(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wallet_tx_payment_intent_id
+ON wallet_transactions(payment_intent_id)
+WHERE payment_intent_id IS NOT NULL;
 
--- Enable Row Level Security (RLS) - optional, can be configured later
+-- Enable Row Level Security (RLS)
 -- ALTER TABLE shops ENABLE ROW LEVEL SECURITY;
 -- ALTER TABLE menu_items ENABLE ROW LEVEL SECURITY;
 -- ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 -- ALTER TABLE loyalty_transactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE wallets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE wallet_transactions ENABLE ROW LEVEL SECURITY;
+
+-- Wallet policies (safe to re-run)
+DROP POLICY IF EXISTS "wallets_select_own" ON wallets;
+CREATE POLICY "wallets_select_own"
+ON wallets
+FOR SELECT
+TO authenticated
+USING (auth.uid()::TEXT = user_id);
+
+DROP POLICY IF EXISTS "wallets_insert_own" ON wallets;
+CREATE POLICY "wallets_insert_own"
+ON wallets
+FOR INSERT
+TO authenticated
+WITH CHECK (auth.uid()::TEXT = user_id);
+
+DROP POLICY IF EXISTS "wallets_update_own" ON wallets;
+CREATE POLICY "wallets_update_own"
+ON wallets
+FOR UPDATE
+TO authenticated
+USING (auth.uid()::TEXT = user_id)
+WITH CHECK (auth.uid()::TEXT = user_id);
+
+DROP POLICY IF EXISTS "wallet_tx_select_own" ON wallet_transactions;
+CREATE POLICY "wallet_tx_select_own"
+ON wallet_transactions
+FOR SELECT
+TO authenticated
+USING (auth.uid()::TEXT = user_id);
+
+DROP POLICY IF EXISTS "wallet_tx_insert_own" ON wallet_transactions;
+CREATE POLICY "wallet_tx_insert_own"
+ON wallet_transactions
+FOR INSERT
+TO authenticated
+WITH CHECK (auth.uid()::TEXT = user_id);

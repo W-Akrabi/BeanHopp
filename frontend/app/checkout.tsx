@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   Alert,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { useRouter, Stack } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -16,17 +17,20 @@ import { COLORS, FONTS, SPACING, RADIUS, SHADOWS } from '../src/constants/theme'
 import { useCartStore } from '../src/stores/cartStore';
 import { useAuthStore } from '../src/stores/authStore';
 import api from '../src/lib/api';
+import { useOptionalStripe } from '../src/lib/stripeCompat';
 
 export default function Checkout() {
   const router = useRouter();
   const { items, shopId, shopName, getSubtotal, getTax, getTotal, clearCart } = useCartStore();
   const user = useAuthStore((state) => state.user);
+  const stripe = useOptionalStripe();
+  const { initPaymentSheet, presentPaymentSheet } = stripe;
   
   const [loading, setLoading] = useState(false);
   const [processingPayment, setProcessingPayment] = useState(false);
   const [specialInstructions, setSpecialInstructions] = useState('');
   const [pickupTime, setPickupTime] = useState<'asap' | '15min' | '30min'>('asap');
-  const [paymentMethod, setPaymentMethod] = useState<'card' | 'apple' | 'google'>('card');
+  const [paymentMethod, setPaymentMethod] = useState<'card'>('card');
 
   const handlePlaceOrder = async () => {
     if (!user) {
@@ -42,18 +46,23 @@ export default function Checkout() {
       return;
     }
 
+    if (Platform.OS === 'web') {
+      Alert.alert('Unsupported', 'Checkout payment is available on iOS/Android only.');
+      return;
+    }
+
+    if (!stripe.available) {
+      Alert.alert('Stripe Unavailable', 'Checkout payment requires a development build (not Expo Go).');
+      return;
+    }
+
     setLoading(true);
     setProcessingPayment(true);
+    let createdOrderId: string | null = null;
+    let orderConfirmed = false;
 
     try {
-      // Step 1: Create payment intent
-      const paymentResponse = await api.post('/stripe/create-payment-intent', {
-        amount: getTotal(),
-      });
-
-      const { clientSecret, paymentIntentId, mock } = paymentResponse.data;
-
-      // Step 2: Create order
+      // Step 1: Create order (pending)
       const orderData = {
         user_id: user.id,
         shop_id: shopId,
@@ -73,18 +82,44 @@ export default function Checkout() {
 
       const orderResponse = await api.post('/orders', orderData);
       const order = orderResponse.data;
+      createdOrderId = order.id;
 
-      // Step 3: Confirm payment (mock for now without Stripe secret key)
-      if (mock) {
-        // Simulate payment processing
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        
-        // Update order status to confirmed
-        await api.patch(`/orders/${order.id}/status?status=confirmed`);
-      } else {
-        // Real Stripe payment would happen here
-        await api.post(`/stripe/confirm-payment?payment_intent_id=${paymentIntentId}&order_id=${order.id}`);
+      // Step 2: Create payment intent for this order
+      const paymentResponse = await api.post('/stripe/create-payment-intent', {
+        amount: getTotal(),
+        order_id: order.id,
+        user_id: user.id,
+        email: user.email,
+        purpose: 'order',
+        save_payment_method: true,
+      });
+
+      const { clientSecret, paymentIntentId } = paymentResponse.data;
+
+      // Step 3: Complete payment
+      const initResult = await initPaymentSheet({
+        merchantDisplayName: 'BeanHop',
+        paymentIntentClientSecret: clientSecret,
+        allowsDelayedPaymentMethods: false,
+        returnURL: 'beanhop://stripe-redirect',
+      });
+
+      if (initResult.error) {
+        throw new Error(initResult.error.message);
       }
+
+      const paymentResult = await presentPaymentSheet();
+      if (paymentResult.error) {
+        if (paymentResult.error.code === 'Canceled') {
+          await api.patch(`/orders/${order.id}/status?status=cancelled`);
+          Alert.alert('Payment Cancelled', 'Your order was not charged.');
+          return;
+        }
+        throw new Error(paymentResult.error.message);
+      }
+
+      await api.post(`/stripe/confirm-payment?payment_intent_id=${paymentIntentId}&order_id=${order.id}`);
+      orderConfirmed = true;
 
       // Step 4: Clear cart and navigate to order
       clearCart();
@@ -100,6 +135,13 @@ export default function Checkout() {
         ]
       );
     } catch (error: any) {
+      if (createdOrderId && !orderConfirmed) {
+        try {
+          await api.patch(`/orders/${createdOrderId}/status?status=cancelled`);
+        } catch {
+          // Ignore cancellation cleanup failures
+        }
+      }
       console.error('Order error:', error);
       Alert.alert(
         'Order Failed',
@@ -118,9 +160,7 @@ export default function Checkout() {
   ];
 
   const paymentOptions = [
-    { id: 'card', label: 'Credit/Debit Card', icon: 'card-outline' },
-    { id: 'apple', label: 'Apple Pay', icon: 'logo-apple' },
-    { id: 'google', label: 'Google Pay', icon: 'logo-google' },
+    { id: 'card', label: 'Card (saved or new)', icon: 'card-outline' },
   ];
 
   if (processingPayment) {

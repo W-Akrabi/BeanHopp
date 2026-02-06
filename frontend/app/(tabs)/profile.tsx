@@ -10,14 +10,16 @@ import {
   Modal,
   TextInput,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { Card, Button } from '../../src/components';
+import { Button } from '../../src/components';
 import { COLORS, FONTS, SPACING, RADIUS, SHADOWS } from '../../src/constants/theme';
 import { useAuthStore } from '../../src/stores/authStore';
 import api from '../../src/lib/api';
+import { useOptionalStripe } from '../../src/lib/stripeCompat';
 
 interface FavoriteShop {
   id: string;
@@ -33,6 +35,15 @@ interface WalletTransaction {
   created_at: string;
 }
 
+interface SavedPaymentMethod {
+  id: string;
+  brand: string | null;
+  last4: string | null;
+  exp_month: number | null;
+  exp_year: number | null;
+  is_default: boolean;
+}
+
 const mockFavorites: FavoriteShop[] = [
   { id: 'shop-1', name: 'Moonbean Coffee', rating: 4.8 },
   { id: 'shop-2', name: 'Chapter Coffee', rating: 4.9 },
@@ -43,12 +54,17 @@ const topUpAmounts = [10, 25, 50, 100];
 export default function Profile() {
   const router = useRouter();
   const { user, signOut } = useAuthStore();
+  const stripe = useOptionalStripe();
+  const { initPaymentSheet, presentPaymentSheet } = stripe;
   const [favorites, setFavorites] = useState<FavoriteShop[]>(mockFavorites);
   const [userPoints, setUserPoints] = useState(0);
   const [walletBalance, setWalletBalance] = useState(0);
   const [walletTransactions, setWalletTransactions] = useState<WalletTransaction[]>([]);
+  const [savedPaymentMethods, setSavedPaymentMethods] = useState<SavedPaymentMethod[]>([]);
+  const [paymentsLoading, setPaymentsLoading] = useState(false);
   const [showWalletModal, setShowWalletModal] = useState(false);
   const [showTopUpModal, setShowTopUpModal] = useState(false);
+  const [showPaymentsModal, setShowPaymentsModal] = useState(false);
   const [selectedTopUpAmount, setSelectedTopUpAmount] = useState<number | null>(null);
   const [customAmount, setCustomAmount] = useState('');
   const [loading, setLoading] = useState(false);
@@ -57,6 +73,7 @@ export default function Profile() {
     if (user) {
       fetchUserData();
       fetchWalletData();
+      fetchPaymentMethods();
     }
   }, [user]);
 
@@ -80,6 +97,27 @@ export default function Profile() {
     }
   };
 
+  const fetchPaymentMethods = async () => {
+    if (!user?.id) {
+      return;
+    }
+
+    setPaymentsLoading(true);
+    try {
+      const response = await api.get(`/payments/methods/${user.id}`, {
+        params: {
+          email: user.email,
+        },
+      });
+      setSavedPaymentMethods(response.data.payment_methods || []);
+    } catch (error) {
+      console.log('Error fetching payment methods:', error);
+      setSavedPaymentMethods([]);
+    } finally {
+      setPaymentsLoading(false);
+    }
+  };
+
   const handleTopUp = async () => {
     const amount = selectedTopUpAmount || parseFloat(customAmount);
     if (!amount || amount <= 0) {
@@ -87,21 +125,73 @@ export default function Profile() {
       return;
     }
 
+    if (!user?.id) {
+      Alert.alert('Sign In Required', 'Please sign in to add funds');
+      return;
+    }
+
+    if (Platform.OS === 'web') {
+      Alert.alert('Unsupported', 'Wallet top-up via card is available on iOS/Android only.');
+      return;
+    }
+
+    if (!stripe.available) {
+      Alert.alert(
+        'Stripe Unavailable',
+        'Card top-up requires a development build (not Expo Go).'
+      );
+      return;
+    }
+
     setLoading(true);
     try {
-      const response = await api.post('/wallet/topup', {
-        user_id: user?.id,
-        amount: amount,
+      const intentResponse = await api.post('/wallet/topup/create-payment-intent', {
+        user_id: user.id,
+        amount,
+        email: user.email,
       });
-      
-      if (response.data.success) {
-        setWalletBalance(response.data.new_balance);
-        Alert.alert('Success!', `$${amount.toFixed(2)} added to your wallet`);
-        setShowTopUpModal(false);
-        setSelectedTopUpAmount(null);
-        setCustomAmount('');
-        fetchWalletData();
+
+      const { clientSecret, paymentIntentId } = intentResponse.data;
+
+      const initResult = await initPaymentSheet({
+        merchantDisplayName: 'BeanHop',
+        paymentIntentClientSecret: clientSecret,
+        allowsDelayedPaymentMethods: false,
+        returnURL: 'beanhop://stripe-redirect',
+      });
+
+      if (initResult.error) {
+        Alert.alert('Payment Setup Failed', initResult.error.message);
+        return;
       }
+
+      const paymentResult = await presentPaymentSheet();
+      if (paymentResult.error) {
+        if (paymentResult.error.code === 'Canceled') {
+          return;
+        }
+        Alert.alert('Payment Failed', paymentResult.error.message);
+        return;
+      }
+
+      const response = await api.post('/wallet/topup', {
+        user_id: user.id,
+        amount,
+        payment_intent_id: paymentIntentId,
+      });
+
+      if (!response.data.success) {
+        Alert.alert('Error', 'Payment completed, but wallet update failed. Contact support.');
+        return;
+      }
+
+      setWalletBalance(response.data.new_balance);
+      Alert.alert('Success!', `$${amount.toFixed(2)} added to your wallet`);
+      setShowTopUpModal(false);
+      setSelectedTopUpAmount(null);
+      setCustomAmount('');
+      fetchWalletData();
+      fetchPaymentMethods();
     } catch (error: any) {
       Alert.alert('Error', error.response?.data?.detail || 'Failed to add funds');
     } finally {
@@ -150,6 +240,17 @@ export default function Profile() {
       title: 'Wallet',
       subtitle: `Balance: $${walletBalance.toFixed(2)}`,
       onPress: () => setShowWalletModal(true),
+    },
+    {
+      icon: 'card-outline',
+      title: 'Payments',
+      subtitle: savedPaymentMethods.length > 0
+        ? `${savedPaymentMethods.length} saved payment method${savedPaymentMethods.length > 1 ? 's' : ''}`
+        : 'No saved payment methods',
+      onPress: () => {
+        setShowPaymentsModal(true);
+        fetchPaymentMethods();
+      },
     },
     {
       icon: 'settings-outline',
@@ -330,9 +431,79 @@ export default function Profile() {
           </View>
 
           <Button
-            title={loading ? 'Processing...' : `Add $${(selectedTopUpAmount || parseFloat(customAmount) || 0).toFixed(2)}`}
+            title={loading ? 'Processing...' : `Pay $${(selectedTopUpAmount || parseFloat(customAmount) || 0).toFixed(2)}`}
             onPress={handleTopUp}
             disabled={loading || (!selectedTopUpAmount && !customAmount)}
+            style={styles.confirmButton}
+          />
+        </View>
+      </View>
+    </Modal>
+  );
+
+  const renderPaymentsModal = () => (
+    <Modal
+      visible={showPaymentsModal}
+      animationType="slide"
+      transparent
+      onRequestClose={() => setShowPaymentsModal(false)}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalContent}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Payment Methods</Text>
+            <TouchableOpacity
+              style={styles.modalClose}
+              onPress={() => setShowPaymentsModal(false)}
+            >
+              <Ionicons name="close" size={24} color={COLORS.darkNavy} />
+            </TouchableOpacity>
+          </View>
+
+          {paymentsLoading ? (
+            <View style={styles.paymentsLoading}>
+              <ActivityIndicator size="small" color={COLORS.primaryBlue} />
+              <Text style={styles.paymentsLoadingText}>Loading payment methods...</Text>
+            </View>
+          ) : savedPaymentMethods.length > 0 ? (
+            <ScrollView style={styles.paymentMethodsList}>
+              {savedPaymentMethods.map((method) => (
+                <View key={method.id} style={styles.savedPaymentCard}>
+                  <View style={styles.savedPaymentLeft}>
+                    <View style={styles.savedPaymentIcon}>
+                      <Ionicons name="card-outline" size={20} color={COLORS.primaryBlue} />
+                    </View>
+                    <View>
+                      <Text style={styles.savedPaymentTitle}>
+                        {(method.brand || 'card').toUpperCase()} •••• {method.last4 || '----'}
+                      </Text>
+                      <Text style={styles.savedPaymentSubtitle}>
+                        Expires {String(method.exp_month || '--').padStart(2, '0')}/{method.exp_year || '----'}
+                      </Text>
+                    </View>
+                  </View>
+                  {method.is_default && (
+                    <View style={styles.defaultBadge}>
+                      <Text style={styles.defaultBadgeText}>Default</Text>
+                    </View>
+                  )}
+                </View>
+              ))}
+            </ScrollView>
+          ) : (
+            <View style={styles.emptyTransactions}>
+              <Ionicons name="card-outline" size={48} color={COLORS.lightGray} />
+              <Text style={styles.emptyText}>No saved payment methods yet</Text>
+              <Text style={styles.savedPaymentHint}>
+                Use checkout or wallet top-up with card to save a payment method.
+              </Text>
+            </View>
+          )}
+
+          <Button
+            title="Refresh"
+            onPress={fetchPaymentMethods}
+            disabled={paymentsLoading}
             style={styles.confirmButton}
           />
         </View>
@@ -466,6 +637,7 @@ export default function Profile() {
 
       {renderWalletModal()}
       {renderTopUpModal()}
+      {renderPaymentsModal()}
     </SafeAreaView>
   );
 }
@@ -867,5 +1039,69 @@ const styles = StyleSheet.create({
   },
   confirmButton: {
     width: '100%',
+  },
+  paymentMethodsList: {
+    maxHeight: 360,
+    marginBottom: SPACING.lg,
+  },
+  savedPaymentCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: SPACING.md,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.lightGray,
+  },
+  savedPaymentLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  savedPaymentIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#E3F2FD',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: SPACING.md,
+  },
+  savedPaymentTitle: {
+    fontSize: FONTS.body,
+    color: COLORS.darkNavy,
+    fontWeight: FONTS.semibold,
+  },
+  savedPaymentSubtitle: {
+    fontSize: FONTS.caption,
+    color: COLORS.textSecondary,
+    marginTop: 2,
+  },
+  defaultBadge: {
+    backgroundColor: '#E8F5E9',
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 4,
+    borderRadius: RADIUS.full,
+  },
+  defaultBadgeText: {
+    fontSize: FONTS.caption,
+    color: COLORS.green,
+    fontWeight: FONTS.semibold,
+  },
+  savedPaymentHint: {
+    fontSize: FONTS.caption,
+    color: COLORS.textSecondary,
+    textAlign: 'center',
+    marginTop: SPACING.xs,
+    paddingHorizontal: SPACING.lg,
+  },
+  paymentsLoading: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: SPACING.xl,
+    marginBottom: SPACING.md,
+  },
+  paymentsLoadingText: {
+    marginTop: SPACING.sm,
+    fontSize: FONTS.bodySmall,
+    color: COLORS.textSecondary,
   },
 });
