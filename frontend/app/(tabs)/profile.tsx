@@ -62,6 +62,7 @@ export default function Profile() {
   const [walletTransactions, setWalletTransactions] = useState<WalletTransaction[]>([]);
   const [savedPaymentMethods, setSavedPaymentMethods] = useState<SavedPaymentMethod[]>([]);
   const [paymentsLoading, setPaymentsLoading] = useState(false);
+  const [addingPaymentMethod, setAddingPaymentMethod] = useState(false);
   const [showWalletModal, setShowWalletModal] = useState(false);
   const [showTopUpModal, setShowTopUpModal] = useState(false);
   const [showPaymentsModal, setShowPaymentsModal] = useState(false);
@@ -115,6 +116,60 @@ export default function Profile() {
       setSavedPaymentMethods([]);
     } finally {
       setPaymentsLoading(false);
+    }
+  };
+
+  const handleAddPaymentMethod = async () => {
+    if (!user?.id) {
+      Alert.alert('Sign In Required', 'Please sign in to add payment methods');
+      return;
+    }
+
+    if (Platform.OS === 'web') {
+      Alert.alert('Unsupported', 'Adding payment methods is available on iOS/Android only.');
+      return;
+    }
+
+    if (!stripe.available) {
+      Alert.alert('Stripe Unavailable', 'This feature requires a development build (not Expo Go).');
+      return;
+    }
+
+    setAddingPaymentMethod(true);
+    try {
+      const response = await api.post('/payments/setup-intent', {
+        user_id: user.id,
+        email: user.email,
+      });
+
+      const { clientSecret } = response.data;
+      const initResult = await initPaymentSheet({
+        merchantDisplayName: 'BeanHop',
+        setupIntentClientSecret: clientSecret,
+        allowsDelayedPaymentMethods: false,
+        returnURL: 'beanhop://stripe-redirect',
+      });
+
+      if (initResult.error) {
+        Alert.alert('Payment Setup Failed', initResult.error.message);
+        return;
+      }
+
+      const presentResult = await presentPaymentSheet();
+      if (presentResult.error) {
+        if (presentResult.error.code === 'Canceled') {
+          return;
+        }
+        Alert.alert('Add Payment Method Failed', presentResult.error.message);
+        return;
+      }
+
+      Alert.alert('Success', 'Payment method added successfully.');
+      fetchPaymentMethods();
+    } catch (error: any) {
+      Alert.alert('Error', error.response?.data?.detail || 'Failed to add payment method');
+    } finally {
+      setAddingPaymentMethod(false);
     }
   };
 
@@ -501,9 +556,16 @@ export default function Profile() {
           )}
 
           <Button
+            title={addingPaymentMethod ? 'Adding...' : 'Add Payment Method'}
+            onPress={handleAddPaymentMethod}
+            disabled={addingPaymentMethod}
+            style={styles.addPaymentButton}
+          />
+
+          <Button
             title="Refresh"
             onPress={fetchPaymentMethods}
-            disabled={paymentsLoading}
+            disabled={paymentsLoading || addingPaymentMethod}
             style={styles.confirmButton}
           />
         </View>
@@ -1039,6 +1101,10 @@ const styles = StyleSheet.create({
   },
   confirmButton: {
     width: '100%',
+  },
+  addPaymentButton: {
+    width: '100%',
+    marginBottom: SPACING.sm,
   },
   paymentMethodsList: {
     maxHeight: 360,

@@ -268,6 +268,11 @@ class PaymentIntentRequest(BaseModel):
     email: Optional[str] = None
     purpose: str = "order"
     save_payment_method: bool = True
+    preferred_payment_method_id: Optional[str] = None
+
+class PaymentMethodSetupRequest(BaseModel):
+    user_id: str
+    email: Optional[str] = None
 
 @api_router.get("/stripe/config")
 async def get_stripe_config():
@@ -307,6 +312,18 @@ async def create_payment_intent(request: PaymentIntentRequest):
             customer = get_or_create_stripe_customer(request.user_id, email=request.email)
             customer_id = customer.id
             payment_intent_params["customer"] = customer_id
+
+            if request.preferred_payment_method_id:
+                payment_method = stripe.PaymentMethod.retrieve(request.preferred_payment_method_id)
+                if payment_method.customer != customer_id:
+                    raise HTTPException(status_code=400, detail="Selected payment method does not belong to user")
+
+                stripe.Customer.modify(
+                    customer_id,
+                    invoice_settings={"default_payment_method": request.preferred_payment_method_id}
+                )
+                metadata["preferred_payment_method_id"] = request.preferred_payment_method_id
+
             if request.save_payment_method:
                 payment_intent_params["setup_future_usage"] = "off_session"
 
@@ -403,6 +420,33 @@ async def get_saved_payment_methods(user_id: str, email: Optional[str] = None):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error fetching payment methods: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/payments/setup-intent")
+async def create_payment_method_setup_intent(request: PaymentMethodSetupRequest):
+    """Create a Stripe SetupIntent so user can add/save a card."""
+    try:
+        if not stripe.api_key:
+            raise HTTPException(status_code=503, detail="Stripe is not configured on the server")
+
+        customer = get_or_create_stripe_customer(request.user_id, email=request.email)
+        setup_intent = stripe.SetupIntent.create(
+            customer=customer.id,
+            automatic_payment_methods={"enabled": True},
+            usage="off_session",
+            metadata={"user_id": request.user_id, "purpose": "save_payment_method"},
+        )
+
+        return {
+            "clientSecret": setup_intent.client_secret,
+            "setupIntentId": setup_intent.id,
+            "customerId": customer.id,
+        }
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error creating setup intent: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating payment method setup intent: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ------------ Orders ------------

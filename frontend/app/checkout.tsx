@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -8,6 +8,7 @@ import {
   Alert,
   ActivityIndicator,
   Platform,
+  Switch,
 } from 'react-native';
 import { useRouter, Stack } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -18,6 +19,17 @@ import { useCartStore } from '../src/stores/cartStore';
 import { useAuthStore } from '../src/stores/authStore';
 import api from '../src/lib/api';
 import { useOptionalStripe } from '../src/lib/stripeCompat';
+
+interface SavedPaymentMethod {
+  id: string;
+  brand: string | null;
+  last4: string | null;
+  exp_month: number | null;
+  exp_year: number | null;
+  is_default: boolean;
+}
+
+type CheckoutPaymentSelection = 'wallet' | 'saved' | 'new';
 
 export default function Checkout() {
   const router = useRouter();
@@ -30,7 +42,57 @@ export default function Checkout() {
   const [processingPayment, setProcessingPayment] = useState(false);
   const [specialInstructions, setSpecialInstructions] = useState('');
   const [pickupTime, setPickupTime] = useState<'asap' | '15min' | '30min'>('asap');
-  const [paymentMethod, setPaymentMethod] = useState<'card'>('card');
+  const [walletBalance, setWalletBalance] = useState(0);
+  const [savedPaymentMethods, setSavedPaymentMethods] = useState<SavedPaymentMethod[]>([]);
+  const [paymentsLoading, setPaymentsLoading] = useState(false);
+  const [selectedPaymentType, setSelectedPaymentType] = useState<CheckoutPaymentSelection>('new');
+  const [selectedSavedMethodId, setSelectedSavedMethodId] = useState<string | null>(null);
+  const [saveNewPaymentMethod, setSaveNewPaymentMethod] = useState(true);
+
+  const total = getTotal();
+  const canUseWallet = walletBalance >= total;
+  const selectedSavedMethod = savedPaymentMethods.find((pm) => pm.id === selectedSavedMethodId) || null;
+
+  useEffect(() => {
+    if (user?.id) {
+      fetchPaymentContext();
+    }
+  }, [user?.id]);
+
+  const fetchPaymentContext = async () => {
+    if (!user?.id) {
+      return;
+    }
+
+    setPaymentsLoading(true);
+    try {
+      const [walletResponse, methodsResponse] = await Promise.all([
+        api.get(`/wallet/${user.id}`),
+        api.get(`/payments/methods/${user.id}`, {
+          params: { email: user.email },
+        }),
+      ]);
+
+      const nextWalletBalance = walletResponse.data.balance || 0;
+      const methods: SavedPaymentMethod[] = methodsResponse.data.payment_methods || [];
+      setWalletBalance(nextWalletBalance);
+      setSavedPaymentMethods(methods);
+
+      if (methods.length > 0) {
+        const defaultMethod = methods.find((pm) => pm.is_default) || methods[0];
+        setSelectedSavedMethodId(defaultMethod.id);
+        setSelectedPaymentType('saved');
+      } else if (nextWalletBalance >= total) {
+        setSelectedPaymentType('wallet');
+      } else {
+        setSelectedPaymentType('new');
+      }
+    } catch (error) {
+      console.log('Error fetching checkout payment context:', error);
+    } finally {
+      setPaymentsLoading(false);
+    }
+  };
 
   const handlePlaceOrder = async () => {
     if (!user) {
@@ -46,14 +108,27 @@ export default function Checkout() {
       return;
     }
 
-    if (Platform.OS === 'web') {
-      Alert.alert('Unsupported', 'Checkout payment is available on iOS/Android only.');
+    if (selectedPaymentType === 'wallet' && !canUseWallet) {
+      Alert.alert('Insufficient Wallet Balance', 'Please add funds or choose card payment.');
       return;
     }
 
-    if (!stripe.available) {
-      Alert.alert('Stripe Unavailable', 'Checkout payment requires a development build (not Expo Go).');
+    if (selectedPaymentType === 'saved' && !selectedSavedMethodId) {
+      Alert.alert('Select Payment Method', 'Please select a saved card or choose Add new payment method.');
       return;
+    }
+
+    const usingCardPayment = selectedPaymentType === 'saved' || selectedPaymentType === 'new';
+    if (usingCardPayment) {
+      if (Platform.OS === 'web') {
+        Alert.alert('Unsupported', 'Checkout payment is available on iOS/Android only.');
+        return;
+      }
+
+      if (!stripe.available) {
+        Alert.alert('Stripe Unavailable', 'Checkout payment requires a development build (not Expo Go).');
+        return;
+      }
     }
 
     setLoading(true);
@@ -75,7 +150,7 @@ export default function Checkout() {
         })),
         subtotal: getSubtotal(),
         tax: getTax(),
-        total: getTotal(),
+        total,
         special_instructions: specialInstructions,
         pickup_time: pickupTime,
       };
@@ -84,42 +159,57 @@ export default function Checkout() {
       const order = orderResponse.data;
       createdOrderId = order.id;
 
-      // Step 2: Create payment intent for this order
-      const paymentResponse = await api.post('/stripe/create-payment-intent', {
-        amount: getTotal(),
-        order_id: order.id,
-        user_id: user.id,
-        email: user.email,
-        purpose: 'order',
-        save_payment_method: true,
-      });
+      if (selectedPaymentType === 'wallet') {
+        await api.post('/wallet/pay', null, {
+          params: {
+            user_id: user.id,
+            amount: total,
+            order_id: order.id,
+          },
+        });
+        await api.patch(`/orders/${order.id}/status?status=confirmed`);
+        orderConfirmed = true;
+        setWalletBalance((prev) => Math.max(0, prev - total));
+      } else {
+        // Step 2: Create payment intent for this order
+        const paymentResponse = await api.post('/stripe/create-payment-intent', {
+          amount: total,
+          order_id: order.id,
+          user_id: user.id,
+          email: user.email,
+          purpose: 'order',
+          save_payment_method: selectedPaymentType === 'new' ? saveNewPaymentMethod : false,
+          preferred_payment_method_id: selectedPaymentType === 'saved' ? selectedSavedMethodId : undefined,
+        });
 
-      const { clientSecret, paymentIntentId } = paymentResponse.data;
+        const { clientSecret, paymentIntentId } = paymentResponse.data;
 
-      // Step 3: Complete payment
-      const initResult = await initPaymentSheet({
-        merchantDisplayName: 'BeanHop',
-        paymentIntentClientSecret: clientSecret,
-        allowsDelayedPaymentMethods: false,
-        returnURL: 'beanhop://stripe-redirect',
-      });
+        // Step 3: Complete payment
+        const initResult = await initPaymentSheet({
+          merchantDisplayName: 'BeanHop',
+          paymentIntentClientSecret: clientSecret,
+          allowsDelayedPaymentMethods: false,
+          returnURL: 'beanhop://stripe-redirect',
+        });
 
-      if (initResult.error) {
-        throw new Error(initResult.error.message);
-      }
-
-      const paymentResult = await presentPaymentSheet();
-      if (paymentResult.error) {
-        if (paymentResult.error.code === 'Canceled') {
-          await api.patch(`/orders/${order.id}/status?status=cancelled`);
-          Alert.alert('Payment Cancelled', 'Your order was not charged.');
-          return;
+        if (initResult.error) {
+          throw new Error(initResult.error.message);
         }
-        throw new Error(paymentResult.error.message);
-      }
 
-      await api.post(`/stripe/confirm-payment?payment_intent_id=${paymentIntentId}&order_id=${order.id}`);
-      orderConfirmed = true;
+        const paymentResult = await presentPaymentSheet();
+        if (paymentResult.error) {
+          if (paymentResult.error.code === 'Canceled') {
+            await api.patch(`/orders/${order.id}/status?status=cancelled`);
+            Alert.alert('Payment Cancelled', 'Your order was not charged.');
+            return;
+          }
+          throw new Error(paymentResult.error.message);
+        }
+
+        await api.post(`/stripe/confirm-payment?payment_intent_id=${paymentIntentId}&order_id=${order.id}`);
+        orderConfirmed = true;
+        await fetchPaymentContext();
+      }
 
       // Step 4: Clear cart and navigate to order
       clearCart();
@@ -157,10 +247,6 @@ export default function Checkout() {
     { id: 'asap', label: 'ASAP', sublabel: '10-15 min' },
     { id: '15min', label: '15 min', sublabel: 'Schedule' },
     { id: '30min', label: '30 min', sublabel: 'Schedule' },
-  ];
-
-  const paymentOptions = [
-    { id: 'card', label: 'Card (saved or new)', icon: 'card-outline' },
   ];
 
   if (processingPayment) {
@@ -281,39 +367,160 @@ export default function Checkout() {
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Payment Method</Text>
             <View style={styles.paymentMethods}>
-              {paymentOptions.map((option) => (
-                <TouchableOpacity
-                  key={option.id}
-                  style={[
-                    styles.paymentOption,
-                    paymentMethod === option.id && styles.paymentOptionActive,
-                  ]}
-                  onPress={() => setPaymentMethod(option.id as typeof paymentMethod)}
-                >
-                  <View style={styles.paymentOptionLeft}>
-                    <Ionicons
-                      name={option.icon as any}
-                      size={24}
-                      color={paymentMethod === option.id ? COLORS.primaryBlue : COLORS.darkNavy}
-                    />
+              <TouchableOpacity
+                style={[
+                  styles.paymentOption,
+                  selectedPaymentType === 'wallet' && styles.paymentOptionActive,
+                  !canUseWallet && styles.paymentOptionDisabled,
+                ]}
+                onPress={() => {
+                  if (canUseWallet) {
+                    setSelectedPaymentType('wallet');
+                  }
+                }}
+                disabled={!canUseWallet}
+              >
+                <View style={styles.paymentOptionLeft}>
+                  <Ionicons
+                    name="wallet-outline"
+                    size={24}
+                    color={selectedPaymentType === 'wallet' ? COLORS.primaryBlue : COLORS.darkNavy}
+                  />
+                  <View>
                     <Text style={[
                       styles.paymentOptionText,
-                      paymentMethod === option.id && styles.paymentOptionTextActive,
+                      selectedPaymentType === 'wallet' && styles.paymentOptionTextActive,
+                      !canUseWallet && styles.paymentOptionTextMuted,
                     ]}>
-                      {option.label}
+                      Wallet (${walletBalance.toFixed(2)})
                     </Text>
-                  </View>
-                  <View style={[
-                    styles.radioButton,
-                    paymentMethod === option.id && styles.radioButtonActive,
-                  ]}>
-                    {paymentMethod === option.id && (
-                      <Ionicons name="checkmark" size={14} color={COLORS.white} />
+                    {!canUseWallet && (
+                      <Text style={styles.paymentOptionSubtext}>
+                        Need ${(total - walletBalance).toFixed(2)} more
+                      </Text>
                     )}
                   </View>
-                </TouchableOpacity>
-              ))}
+                </View>
+                <View style={[
+                  styles.radioButton,
+                  selectedPaymentType === 'wallet' && styles.radioButtonActive,
+                ]}>
+                  {selectedPaymentType === 'wallet' && (
+                    <Ionicons name="checkmark" size={14} color={COLORS.white} />
+                  )}
+                </View>
+              </TouchableOpacity>
+
+              <View style={styles.paymentSectionHeader}>
+                <Text style={styles.paymentSectionHeaderText}>Saved payment methods</Text>
+              </View>
+
+              {paymentsLoading ? (
+                <View style={styles.paymentLoadingRow}>
+                  <ActivityIndicator size="small" color={COLORS.primaryBlue} />
+                  <Text style={styles.paymentLoadingText}>Loading methods...</Text>
+                </View>
+              ) : (
+                <>
+                  {savedPaymentMethods.map((method) => (
+                    <TouchableOpacity
+                      key={method.id}
+                      style={[
+                        styles.paymentOption,
+                        selectedPaymentType === 'saved' &&
+                          selectedSavedMethodId === method.id &&
+                          styles.paymentOptionActive,
+                      ]}
+                      onPress={() => {
+                        setSelectedSavedMethodId(method.id);
+                        setSelectedPaymentType('saved');
+                      }}
+                    >
+                      <View style={styles.paymentOptionLeft}>
+                        <Ionicons
+                          name="card-outline"
+                          size={24}
+                          color={
+                            selectedPaymentType === 'saved' && selectedSavedMethodId === method.id
+                              ? COLORS.primaryBlue
+                              : COLORS.darkNavy
+                          }
+                        />
+                        <View>
+                          <Text style={[
+                            styles.paymentOptionText,
+                            selectedPaymentType === 'saved' &&
+                              selectedSavedMethodId === method.id &&
+                              styles.paymentOptionTextActive,
+                          ]}>
+                            {(method.brand || 'Card').toUpperCase()} •••• {method.last4 || '----'}
+                          </Text>
+                          <Text style={styles.paymentOptionSubtext}>
+                            Expires {String(method.exp_month || '--').padStart(2, '0')}/{method.exp_year || '----'}
+                            {method.is_default ? ' • Default' : ''}
+                          </Text>
+                        </View>
+                      </View>
+                      <View style={[
+                        styles.radioButton,
+                        selectedPaymentType === 'saved' &&
+                          selectedSavedMethodId === method.id &&
+                          styles.radioButtonActive,
+                      ]}>
+                        {selectedPaymentType === 'saved' && selectedSavedMethodId === method.id && (
+                          <Ionicons name="checkmark" size={14} color={COLORS.white} />
+                        )}
+                      </View>
+                    </TouchableOpacity>
+                  ))}
+
+                  <TouchableOpacity
+                    style={[
+                      styles.paymentOption,
+                      selectedPaymentType === 'new' && styles.paymentOptionActive,
+                    ]}
+                    onPress={() => setSelectedPaymentType('new')}
+                  >
+                    <View style={styles.paymentOptionLeft}>
+                      <Ionicons
+                        name="add-circle-outline"
+                        size={24}
+                        color={selectedPaymentType === 'new' ? COLORS.primaryBlue : COLORS.darkNavy}
+                      />
+                      <Text style={[
+                        styles.paymentOptionText,
+                        selectedPaymentType === 'new' && styles.paymentOptionTextActive,
+                      ]}>
+                        Add new payment method
+                      </Text>
+                    </View>
+                    <View style={[
+                      styles.radioButton,
+                      selectedPaymentType === 'new' && styles.radioButtonActive,
+                    ]}>
+                      {selectedPaymentType === 'new' && (
+                        <Ionicons name="checkmark" size={14} color={COLORS.white} />
+                      )}
+                    </View>
+                  </TouchableOpacity>
+                </>
+              )}
             </View>
+
+            {selectedPaymentType === 'new' && (
+              <View style={styles.saveMethodRow}>
+                <View>
+                  <Text style={styles.saveMethodTitle}>Save this payment method</Text>
+                  <Text style={styles.saveMethodSubtitle}>Use it again for future orders</Text>
+                </View>
+                <Switch
+                  value={saveNewPaymentMethod}
+                  onValueChange={setSaveNewPaymentMethod}
+                  trackColor={{ false: COLORS.lightGray, true: '#BBD7FF' }}
+                  thumbColor={saveNewPaymentMethod ? COLORS.primaryBlue : '#f4f3f4'}
+                />
+              </View>
+            )}
           </View>
 
           {/* Order Summary */}
@@ -330,7 +537,7 @@ export default function Checkout() {
               </View>
               <View style={[styles.summaryRow, styles.totalRow]}>
                 <Text style={styles.totalLabel}>Total</Text>
-                <Text style={styles.totalValue}>${getTotal().toFixed(2)}</Text>
+                <Text style={styles.totalValue}>${total.toFixed(2)}</Text>
               </View>
             </View>
           </View>
@@ -346,14 +553,24 @@ export default function Checkout() {
           {/* Secure Payment Badge */}
           <View style={styles.secureBadge}>
             <Ionicons name="lock-closed" size={16} color={COLORS.green} />
-            <Text style={styles.secureText}>Secure payment powered by Stripe</Text>
+            <Text style={styles.secureText}>
+              {selectedPaymentType === 'wallet'
+                ? 'Paying with your BeanHop wallet balance'
+                : 'Secure card payment powered by Stripe'}
+            </Text>
           </View>
         </ScrollView>
 
         {/* Place Order Button */}
         <View style={styles.bottomBar}>
           <Button
-            title={`Pay $${getTotal().toFixed(2)}`}
+            title={
+              selectedPaymentType === 'wallet'
+                ? `Pay $${total.toFixed(2)} with Wallet`
+                : selectedPaymentType === 'saved' && selectedSavedMethod
+                  ? `Pay $${total.toFixed(2)} with ${String(selectedSavedMethod.brand || 'CARD').toUpperCase()}`
+                  : `Pay $${total.toFixed(2)}`
+            }
             onPress={handlePlaceOrder}
             loading={loading}
             size="large"
@@ -555,6 +772,9 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: COLORS.lightGray,
   },
+  paymentOptionDisabled: {
+    opacity: 0.6,
+  },
   paymentOptionActive: {
     backgroundColor: '#E3F2FD',
   },
@@ -567,9 +787,63 @@ const styles = StyleSheet.create({
     color: COLORS.darkNavy,
     marginLeft: SPACING.md,
   },
+  paymentOptionTextMuted: {
+    color: COLORS.textSecondary,
+  },
   paymentOptionTextActive: {
     color: COLORS.primaryBlue,
     fontWeight: FONTS.medium,
+  },
+  paymentOptionSubtext: {
+    fontSize: FONTS.caption,
+    color: COLORS.textSecondary,
+    marginLeft: SPACING.md,
+    marginTop: 2,
+  },
+  paymentSectionHeader: {
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    backgroundColor: '#F8FAFC',
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.lightGray,
+  },
+  paymentSectionHeaderText: {
+    fontSize: FONTS.caption,
+    color: COLORS.textSecondary,
+    fontWeight: FONTS.semibold,
+  },
+  paymentLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: SPACING.md,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.lightGray,
+  },
+  paymentLoadingText: {
+    marginLeft: SPACING.sm,
+    color: COLORS.textSecondary,
+    fontSize: FONTS.bodySmall,
+  },
+  saveMethodRow: {
+    marginTop: SPACING.sm,
+    padding: SPACING.md,
+    backgroundColor: COLORS.white,
+    borderRadius: RADIUS.md,
+    borderWidth: 1,
+    borderColor: COLORS.lightGray,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  saveMethodTitle: {
+    fontSize: FONTS.body,
+    color: COLORS.darkNavy,
+    fontWeight: FONTS.semibold,
+  },
+  saveMethodSubtitle: {
+    fontSize: FONTS.caption,
+    color: COLORS.textSecondary,
+    marginTop: 2,
   },
   radioButton: {
     width: 22,
