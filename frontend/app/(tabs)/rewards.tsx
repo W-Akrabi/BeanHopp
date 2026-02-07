@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -6,19 +6,16 @@ import {
   ScrollView,
   TouchableOpacity,
   Modal,
-  Dimensions,
   Alert,
-  ActivityIndicator,
+  Share,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { Card, Button } from '../../src/components';
+import { Card } from '../../src/components';
 import { COLORS, FONTS, SPACING, RADIUS, SHADOWS } from '../../src/constants/theme';
 import { useAuthStore } from '../../src/stores/authStore';
 import api from '../../src/lib/api';
-
-const { width } = Dimensions.get('window');
 
 interface LoyaltyLevel {
   name: string;
@@ -90,13 +87,15 @@ const REWARD_OPTIONS: RewardOption[] = [
 export default function Rewards() {
   const router = useRouter();
   const user = useAuthStore((state) => state.user);
+  const scrollRef = useRef<ScrollView>(null);
   
   const [totalPoints, setTotalPoints] = useState(0);
   const [showLevelDetails, setShowLevelDetails] = useState(false);
   const [showVouchersModal, setShowVouchersModal] = useState(false);
   const [vouchers, setVouchers] = useState<RewardVoucher[]>([]);
   const [loading, setLoading] = useState(false);
-  const [streak, setStreak] = useState({
+  const [redeemSectionY, setRedeemSectionY] = useState(0);
+  const [streak] = useState({
     current: 3,
     target: 5,
     days: [true, true, true, false, false, false, false],
@@ -113,7 +112,7 @@ export default function Rewards() {
     try {
       const response = await api.get(`/loyalty/${user?.id}/points`);
       setTotalPoints(response.data.total_points || 0);
-    } catch (error) {
+    } catch {
       console.log('Using mock data');
     }
   };
@@ -207,6 +206,25 @@ export default function Rewards() {
   const nextLevel = getNextLevel();
   const progress = getProgressToNextLevel();
   const pointsToNext = nextLevel ? nextLevel.minPoints - totalPoints : 0;
+  const shareText = `I am currently ${currentLevel.name} level on BeanHop with ${totalPoints} beans.`;
+
+  const handleShareRewards = async () => {
+    try {
+      await Share.share({
+        title: 'BeanHop Rewards',
+        message: shareText,
+      });
+    } catch {
+      Alert.alert('Share Unavailable', 'Could not open share options right now.');
+    }
+  };
+
+  const scrollToRedeemSection = () => {
+    scrollRef.current?.scrollTo({
+      y: Math.max(0, redeemSectionY - SPACING.md),
+      animated: true,
+    });
+  };
 
   const renderLevelDetailsModal = () => (
     <Modal
@@ -232,7 +250,7 @@ export default function Rewards() {
               <View
                 key={level.name}
                 style={[
-                  styles.levelCard,
+                  styles.levelModalCard,
                   { backgroundColor: level.bgColor },
                   currentLevel.name === level.name && styles.levelCardCurrent,
                 ]}
@@ -273,11 +291,19 @@ export default function Rewards() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        ref={scrollRef}
+        style={styles.scrollView}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+      >
         {/* Header */}
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>Rewards</Text>
-          <TouchableOpacity style={styles.shareButton}>
+          <View>
+            <Text style={styles.headerTitle}>Rewards</Text>
+            <Text style={styles.headerSubtitle}>Earn beans and unlock better perks</Text>
+          </View>
+          <TouchableOpacity style={styles.shareButton} onPress={handleShareRewards}>
             <Ionicons name="share-outline" size={18} color={COLORS.primaryBlue} />
             <Text style={styles.shareText}>Share</Text>
           </TouchableOpacity>
@@ -285,7 +311,7 @@ export default function Rewards() {
 
         {/* Level Card */}
         <Card 
-          style={[styles.levelCard, { backgroundColor: currentLevel.bgColor }]} 
+          style={[styles.levelSummaryCard, { backgroundColor: currentLevel.bgColor }]} 
           shadow="medium"
         >
           <View style={styles.levelCardHeader}>
@@ -313,7 +339,15 @@ export default function Rewards() {
           
           <View style={styles.progressSection}>
             <View style={styles.progressBar}>
-              <View style={[styles.progressFill, { width: `${progress}%` }]} />
+              <View
+                style={[
+                  styles.progressFill,
+                  {
+                    width: `${progress}%`,
+                    backgroundColor: currentLevel.color,
+                  },
+                ]}
+              />
             </View>
             <View style={styles.progressLabels}>
               <Text style={styles.progressLabel}>{totalPoints} pts</Text>
@@ -343,7 +377,7 @@ export default function Rewards() {
               <Text style={styles.beansTitle}>Beans</Text>
               <Text style={styles.beansSubtitle}>Earn and redeem bonus points</Text>
             </View>
-            <TouchableOpacity style={styles.moreButton}>
+            <TouchableOpacity style={styles.moreButton} onPress={() => setShowVouchersModal(true)}>
               <Text style={styles.moreText}>History</Text>
               <Ionicons name="chevron-forward" size={14} color={COLORS.primaryBlue} />
             </TouchableOpacity>
@@ -357,11 +391,12 @@ export default function Rewards() {
           </View>
 
           <View style={styles.beansActions}>
-            <TouchableOpacity style={styles.beansAction}>
+            <TouchableOpacity style={styles.beansAction} onPress={scrollToRedeemSection}>
               <Ionicons name="gift-outline" size={20} color={COLORS.primaryBlue} />
               <Text style={styles.beansActionText}>Redeem</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={styles.beansAction}>
+            <View style={styles.beansActionDivider} />
+            <TouchableOpacity style={styles.beansAction} onPress={() => router.push('/(tabs)/home')}>
               <Ionicons name="card-outline" size={20} color={COLORS.primaryBlue} />
               <Text style={styles.beansActionText}>Earn More</Text>
             </TouchableOpacity>
@@ -423,20 +458,27 @@ export default function Rewards() {
         </Card>
 
         {/* Rewards to Redeem */}
-        <View style={styles.redeemSection}>
+        <View
+          style={styles.redeemSection}
+          onLayout={(event) => {
+            setRedeemSectionY(event.nativeEvent.layout.y);
+          }}
+        >
           <View style={styles.redeemHeader}>
             <Text style={styles.sectionTitle}>Redeem your beans</Text>
-            {vouchers.length > 0 && (
-              <TouchableOpacity 
-                style={styles.myVouchersButton}
-                onPress={() => setShowVouchersModal(true)}
-              >
-                <Text style={styles.myVouchersText}>My Vouchers ({vouchers.length})</Text>
-                <Ionicons name="chevron-forward" size={14} color={COLORS.primaryBlue} />
-              </TouchableOpacity>
-            )}
+            <TouchableOpacity 
+              style={styles.myVouchersButton}
+              onPress={() => setShowVouchersModal(true)}
+            >
+              <Text style={styles.myVouchersText}>My Vouchers ({vouchers.length})</Text>
+              <Ionicons name="chevron-forward" size={14} color={COLORS.primaryBlue} />
+            </TouchableOpacity>
           </View>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.redeemScrollContent}
+          >
             {REWARD_OPTIONS.map((reward) => (
               <TouchableOpacity 
                 key={reward.type}
@@ -594,17 +636,26 @@ const styles = StyleSheet.create({
   scrollView: {
     flex: 1,
   },
+  scrollContent: {
+    paddingBottom: SPACING.xxl,
+  },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     paddingHorizontal: SPACING.lg,
-    paddingVertical: SPACING.md,
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING.sm,
   },
   headerTitle: {
     fontSize: FONTS.h2,
     fontWeight: FONTS.bold,
     color: COLORS.darkNavy,
+  },
+  headerSubtitle: {
+    marginTop: 2,
+    fontSize: FONTS.bodySmall,
+    color: COLORS.textSecondary,
   },
   shareButton: {
     flexDirection: 'row',
@@ -620,9 +671,11 @@ const styles = StyleSheet.create({
     color: COLORS.primaryBlue,
     marginLeft: 4,
   },
-  levelCard: {
+  levelSummaryCard: {
     marginHorizontal: SPACING.lg,
     marginBottom: SPACING.md,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.45)',
   },
   levelCardHeader: {
     flexDirection: 'row',
@@ -654,6 +707,10 @@ const styles = StyleSheet.create({
   detailsButton: {
     flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.75)',
+    borderRadius: RADIUS.full,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 6,
   },
   detailsText: {
     fontSize: FONTS.bodySmall,
@@ -664,8 +721,8 @@ const styles = StyleSheet.create({
     marginBottom: SPACING.md,
   },
   progressBar: {
-    height: 8,
-    backgroundColor: COLORS.white,
+    height: 10,
+    backgroundColor: 'rgba(255,255,255,0.55)',
     borderRadius: 4,
     overflow: 'hidden',
   },
@@ -768,6 +825,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    minHeight: 30,
+  },
+  beansActionDivider: {
+    width: 1,
+    backgroundColor: COLORS.lightGray,
+    marginVertical: 2,
   },
   beansActionText: {
     fontSize: FONTS.bodySmall,
@@ -863,7 +926,12 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
   },
   redeemSection: {
-    paddingVertical: SPACING.md,
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING.sm,
+  },
+  redeemScrollContent: {
+    paddingLeft: SPACING.lg,
+    paddingRight: SPACING.md,
   },
   sectionTitle: {
     fontSize: FONTS.h4,
@@ -871,11 +939,11 @@ const styles = StyleSheet.create({
     color: COLORS.darkNavy,
   },
   redeemCard: {
-    width: 120,
+    width: 136,
     backgroundColor: COLORS.white,
     borderRadius: RADIUS.lg,
     padding: SPACING.md,
-    marginLeft: SPACING.lg,
+    marginRight: SPACING.sm,
     alignItems: 'center',
     ...SHADOWS.small,
   },
@@ -912,7 +980,11 @@ const styles = StyleSheet.create({
   howItWorksItem: {
     flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: COLORS.white,
+    borderRadius: RADIUS.lg,
+    padding: SPACING.md,
     marginBottom: SPACING.md,
+    ...SHADOWS.small,
   },
   howItWorksIcon: {
     width: 48,
@@ -946,6 +1018,12 @@ const styles = StyleSheet.create({
     borderTopRightRadius: RADIUS.xl,
     maxHeight: '80%',
     padding: SPACING.lg,
+    paddingBottom: SPACING.xl,
+  },
+  levelModalCard: {
+    borderRadius: RADIUS.lg,
+    padding: SPACING.md,
+    marginBottom: SPACING.sm,
   },
   modalHeader: {
     flexDirection: 'row',
