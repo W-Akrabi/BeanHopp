@@ -23,6 +23,7 @@ import { useAuthStore } from '../../src/stores/authStore';
 import api from '../../src/lib/api';
 import { useOptionalStripe } from '../../src/lib/stripeCompat';
 import { supabase } from '../../src/lib/supabase';
+import { getPaymentCardTheme } from '../../src/lib/paymentCardTheme';
 
 interface FavoriteShop {
   id: string;
@@ -426,6 +427,12 @@ export default function Profile() {
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   };
 
+  const getExpiryText = (method: SavedPaymentMethod) => {
+    const month = String(method.exp_month || '--').padStart(2, '0');
+    const year = method.exp_year ? String(method.exp_year).slice(-2) : '--';
+    return `${month}/${year}`;
+  };
+
   const walletBalanceDisplay = settings.showWalletBalance
     ? `$${walletBalance.toFixed(2)}`
     : 'Hidden';
@@ -662,29 +669,59 @@ export default function Profile() {
               <Text style={styles.paymentsLoadingText}>Loading payment methods...</Text>
             </View>
           ) : savedPaymentMethods.length > 0 ? (
-            <ScrollView style={styles.paymentMethodsList}>
-              {savedPaymentMethods.map((method) => (
-                <View key={method.id} style={styles.savedPaymentCard}>
-                  <View style={styles.savedPaymentLeft}>
-                    <View style={styles.savedPaymentIcon}>
-                      <Ionicons name="card-outline" size={20} color={COLORS.primaryBlue} />
+            <ScrollView style={styles.paymentMethodsList} showsVerticalScrollIndicator={false}>
+              {savedPaymentMethods.map((method, index) => {
+                const theme = getPaymentCardTheme(method.brand, index);
+                return (
+                  <View
+                    key={method.id}
+                    style={[
+                      styles.paymentCardVisual,
+                      { backgroundColor: theme.background },
+                    ]}
+                  >
+                    <View
+                      style={[
+                        styles.paymentCardGlow,
+                        { backgroundColor: theme.accentOne },
+                      ]}
+                    />
+                    <View
+                      style={[
+                        styles.paymentCardGlowSecondary,
+                        { backgroundColor: theme.accentTwo },
+                      ]}
+                    />
+
+                    <View style={styles.paymentCardTopRow}>
+                      <Text style={styles.paymentCardBrand}>{theme.logoText}</Text>
+                      {method.is_default && (
+                        <View style={styles.paymentCardDefaultBadge}>
+                          <Text style={styles.paymentCardDefaultText}>Default</Text>
+                        </View>
+                      )}
                     </View>
-                    <View>
-                      <Text style={styles.savedPaymentTitle}>
-                        {(method.brand || 'card').toUpperCase()} •••• {method.last4 || '----'}
-                      </Text>
-                      <Text style={styles.savedPaymentSubtitle}>
-                        Expires {String(method.exp_month || '--').padStart(2, '0')}/{method.exp_year || '----'}
-                      </Text>
+
+                    <View style={styles.paymentCardChipRow}>
+                      <View style={styles.paymentCardChip} />
+                      <Ionicons name="wifi" size={18} color="rgba(255,255,255,0.9)" style={styles.tapIcon} />
+                    </View>
+
+                    <Text style={styles.paymentCardNumber}>•••• •••• •••• {method.last4 || '----'}</Text>
+
+                    <View style={styles.paymentCardBottomRow}>
+                      <View>
+                        <Text style={styles.paymentCardMetaLabel}>Card Holder</Text>
+                        <Text style={styles.paymentCardMetaValue}>{getUserName().toUpperCase()}</Text>
+                      </View>
+                      <View style={styles.paymentCardRightMeta}>
+                        <Text style={styles.paymentCardMetaLabel}>Expires</Text>
+                        <Text style={styles.paymentCardMetaValue}>{getExpiryText(method)}</Text>
+                      </View>
                     </View>
                   </View>
-                  {method.is_default && (
-                    <View style={styles.defaultBadge}>
-                      <Text style={styles.defaultBadgeText}>Default</Text>
-                    </View>
-                  )}
-                </View>
-              ))}
+                );
+              })}
             </ScrollView>
           ) : (
             <View style={styles.emptyTransactions}>
@@ -1415,47 +1452,95 @@ const styles = StyleSheet.create({
     maxHeight: 360,
     marginBottom: SPACING.lg,
   },
-  savedPaymentCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: SPACING.md,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.lightGray,
-  },
-  savedPaymentLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  savedPaymentIcon: {
-    width: 36,
-    height: 36,
+  paymentCardVisual: {
     borderRadius: 18,
-    backgroundColor: '#E3F2FD',
+    padding: SPACING.lg,
+    marginBottom: SPACING.md,
+    minHeight: 196,
+    overflow: 'hidden',
+  },
+  paymentCardGlow: {
+    position: 'absolute',
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+    top: -80,
+    left: -35,
+    opacity: 0.35,
+  },
+  paymentCardGlowSecondary: {
+    position: 'absolute',
+    width: 240,
+    height: 240,
+    borderRadius: 120,
+    bottom: -100,
+    right: -60,
+    opacity: 0.25,
+  },
+  paymentCardTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: SPACING.md,
   },
-  savedPaymentTitle: {
-    fontSize: FONTS.body,
-    color: COLORS.darkNavy,
-    fontWeight: FONTS.semibold,
+  paymentCardBrand: {
+    color: COLORS.white,
+    fontSize: FONTS.bodySmall,
+    fontWeight: FONTS.bold,
+    letterSpacing: 1,
   },
-  savedPaymentSubtitle: {
-    fontSize: FONTS.caption,
-    color: COLORS.textSecondary,
-    marginTop: 2,
-  },
-  defaultBadge: {
-    backgroundColor: '#E8F5E9',
+  paymentCardDefaultBadge: {
+    backgroundColor: 'rgba(255,255,255,0.2)',
     paddingHorizontal: SPACING.sm,
     paddingVertical: 4,
     borderRadius: RADIUS.full,
   },
-  defaultBadgeText: {
+  paymentCardDefaultText: {
+    color: COLORS.white,
     fontSize: FONTS.caption,
-    color: COLORS.green,
     fontWeight: FONTS.semibold,
+  },
+  paymentCardChipRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: SPACING.md,
+  },
+  paymentCardChip: {
+    width: 36,
+    height: 28,
+    borderRadius: 6,
+    backgroundColor: '#E6E8EC',
+    borderWidth: 1,
+    borderColor: '#B7BCC5',
+  },
+  tapIcon: {
+    transform: [{ rotate: '90deg' }],
+  },
+  paymentCardNumber: {
+    marginTop: SPACING.lg,
+    color: COLORS.white,
+    fontSize: FONTS.h3,
+    fontWeight: FONTS.bold,
+    letterSpacing: 1.2,
+  },
+  paymentCardBottomRow: {
+    marginTop: SPACING.lg,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+  },
+  paymentCardMetaLabel: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: FONTS.caption,
+  },
+  paymentCardMetaValue: {
+    color: COLORS.white,
+    fontSize: FONTS.bodySmall,
+    fontWeight: FONTS.semibold,
+    marginTop: 2,
+  },
+  paymentCardRightMeta: {
+    alignItems: 'flex-end',
   },
   savedPaymentHint: {
     fontSize: FONTS.caption,
