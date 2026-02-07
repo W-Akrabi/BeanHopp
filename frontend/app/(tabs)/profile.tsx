@@ -11,15 +11,18 @@ import {
   TextInput,
   ActivityIndicator,
   Platform,
+  Switch,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Button } from '../../src/components';
 import { COLORS, FONTS, SPACING, RADIUS, SHADOWS } from '../../src/constants/theme';
 import { useAuthStore } from '../../src/stores/authStore';
 import api from '../../src/lib/api';
 import { useOptionalStripe } from '../../src/lib/stripeCompat';
+import { supabase } from '../../src/lib/supabase';
 
 interface FavoriteShop {
   id: string;
@@ -44,12 +47,27 @@ interface SavedPaymentMethod {
   is_default: boolean;
 }
 
+interface UserSettings {
+  orderUpdates: boolean;
+  pushNotifications: boolean;
+  promoEmails: boolean;
+  biometricLock: boolean;
+  showWalletBalance: boolean;
+}
+
 const mockFavorites: FavoriteShop[] = [
   { id: 'shop-1', name: 'Moonbean Coffee', rating: 4.8 },
   { id: 'shop-2', name: 'Chapter Coffee', rating: 4.9 },
 ];
 
 const topUpAmounts = [10, 25, 50, 100];
+const defaultSettings: UserSettings = {
+  orderUpdates: true,
+  pushNotifications: true,
+  promoEmails: false,
+  biometricLock: false,
+  showWalletBalance: true,
+};
 
 export default function Profile() {
   const router = useRouter();
@@ -66,9 +84,17 @@ export default function Profile() {
   const [showWalletModal, setShowWalletModal] = useState(false);
   const [showTopUpModal, setShowTopUpModal] = useState(false);
   const [showPaymentsModal, setShowPaymentsModal] = useState(false);
+  const [showEditProfileModal, setShowEditProfileModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [selectedTopUpAmount, setSelectedTopUpAmount] = useState<number | null>(null);
   const [customAmount, setCustomAmount] = useState('');
   const [loading, setLoading] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [displayNameInput, setDisplayNameInput] = useState('');
+  const [phoneInput, setPhoneInput] = useState('');
+  const [cityInput, setCityInput] = useState('');
+  const [settings, setSettings] = useState<UserSettings>(defaultSettings);
   const applePayMerchantIdentifier = process.env.EXPO_PUBLIC_APPLE_PAY_MERCHANT_ID || '';
 
   useEffect(() => {
@@ -76,8 +102,37 @@ export default function Profile() {
       fetchUserData();
       fetchWalletData();
       fetchPaymentMethods();
+      hydrateProfileAndSettings();
     }
   }, [user]);
+
+  const hydrateProfileAndSettings = async () => {
+    if (!user) {
+      return;
+    }
+
+    const metadata = (user.user_metadata || {}) as Record<string, any>;
+    setDisplayNameInput(metadata.name || '');
+    setPhoneInput(metadata.phone || '');
+    setCityInput(metadata.city || '');
+
+    let storedSettings: Partial<UserSettings> = {};
+    try {
+      const raw = await AsyncStorage.getItem(`beanhop_settings_${user.id}`);
+      if (raw) {
+        storedSettings = JSON.parse(raw) as Partial<UserSettings>;
+      }
+    } catch {
+      // Keep defaults if local settings are unavailable.
+    }
+
+    const metadataSettings = (metadata.settings || {}) as Partial<UserSettings>;
+    setSettings({
+      ...defaultSettings,
+      ...storedSettings,
+      ...metadataSettings,
+    });
+  };
 
   const fetchUserData = async () => {
     try {
@@ -117,6 +172,79 @@ export default function Profile() {
       setSavedPaymentMethods([]);
     } finally {
       setPaymentsLoading(false);
+    }
+  };
+
+  const persistSettings = async (nextSettings: UserSettings) => {
+    if (!user?.id) {
+      return;
+    }
+
+    await AsyncStorage.setItem(`beanhop_settings_${user.id}`, JSON.stringify(nextSettings));
+  };
+
+  const saveUserMetadata = async (nextData: Record<string, any>) => {
+    const { data, error } = await supabase.auth.updateUser({ data: nextData });
+    if (error) {
+      throw error;
+    }
+
+    if (data.user) {
+      useAuthStore.setState({ user: data.user });
+    }
+  };
+
+  const handleSaveProfile = async () => {
+    if (!user) {
+      return;
+    }
+
+    const trimmedName = displayNameInput.trim();
+    if (!trimmedName) {
+      Alert.alert('Missing Name', 'Please enter your name.');
+      return;
+    }
+
+    setSavingProfile(true);
+    try {
+      const metadata = (user.user_metadata || {}) as Record<string, any>;
+      const nextData = {
+        ...metadata,
+        name: trimmedName,
+        phone: phoneInput.trim(),
+        city: cityInput.trim(),
+        settings,
+      };
+
+      await saveUserMetadata(nextData);
+      setShowEditProfileModal(false);
+      Alert.alert('Saved', 'Your profile information has been updated.');
+    } catch (error: any) {
+      Alert.alert('Update Failed', error.message || 'Could not update your profile.');
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
+  const handleSaveSettings = async () => {
+    if (!user) {
+      return;
+    }
+
+    setSavingSettings(true);
+    try {
+      const metadata = (user.user_metadata || {}) as Record<string, any>;
+      await saveUserMetadata({
+        ...metadata,
+        settings,
+      });
+      await persistSettings(settings);
+      setShowSettingsModal(false);
+      Alert.alert('Saved', 'Your settings have been updated.');
+    } catch (error: any) {
+      Alert.alert('Save Failed', error.message || 'Could not save settings.');
+    } finally {
+      setSavingSettings(false);
     }
   };
 
@@ -298,11 +426,15 @@ export default function Profile() {
     return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   };
 
+  const walletBalanceDisplay = settings.showWalletBalance
+    ? `$${walletBalance.toFixed(2)}`
+    : 'Hidden';
+
   const menuItems = [
     {
       icon: 'wallet-outline',
       title: 'Wallet',
-      subtitle: `Balance: $${walletBalance.toFixed(2)}`,
+      subtitle: `Balance: ${walletBalanceDisplay}`,
       onPress: () => setShowWalletModal(true),
     },
     {
@@ -320,7 +452,7 @@ export default function Profile() {
       icon: 'settings-outline',
       title: 'Settings',
       subtitle: 'App preferences',
-      onPress: () => Alert.alert('Settings', 'Coming soon'),
+      onPress: () => setShowSettingsModal(true),
     },
     {
       icon: 'receipt-outline',
@@ -575,6 +707,175 @@ export default function Profile() {
     </Modal>
   );
 
+  const renderEditProfileModal = () => (
+    <Modal
+      visible={showEditProfileModal}
+      animationType="slide"
+      transparent
+      onRequestClose={() => setShowEditProfileModal(false)}
+    >
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalContent}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Edit Profile</Text>
+            <TouchableOpacity
+              style={styles.modalClose}
+              onPress={() => setShowEditProfileModal(false)}
+            >
+              <Ionicons name="close" size={24} color={COLORS.darkNavy} />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView
+            style={styles.profileForm}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+          >
+            <Text style={styles.inputLabel}>Full Name</Text>
+            <TextInput
+              style={styles.profileInput}
+              value={displayNameInput}
+              onChangeText={setDisplayNameInput}
+              placeholder="Your full name"
+              placeholderTextColor={COLORS.gray}
+            />
+
+            <Text style={styles.inputLabel}>Email</Text>
+            <View style={styles.readOnlyInput}>
+              <Text style={styles.readOnlyInputText}>{user?.email || '-'}</Text>
+            </View>
+
+            <Text style={styles.inputLabel}>Phone Number</Text>
+            <TextInput
+              style={styles.profileInput}
+              value={phoneInput}
+              onChangeText={setPhoneInput}
+              placeholder="Optional"
+              placeholderTextColor={COLORS.gray}
+              keyboardType="phone-pad"
+            />
+
+            <Text style={styles.inputLabel}>City</Text>
+            <TextInput
+              style={styles.profileInput}
+              value={cityInput}
+              onChangeText={setCityInput}
+              placeholder="Optional"
+              placeholderTextColor={COLORS.gray}
+            />
+          </ScrollView>
+
+          <Button
+            title={savingProfile ? 'Saving...' : 'Save Profile'}
+            onPress={handleSaveProfile}
+            disabled={savingProfile}
+            style={styles.modalPrimaryButton}
+          />
+        </View>
+      </View>
+    </Modal>
+  );
+
+  const renderSettingsModal = () => {
+    const settingRows: {
+      key: keyof UserSettings;
+      title: string;
+      subtitle: string;
+    }[] = [
+      {
+        key: 'orderUpdates',
+        title: 'Order updates',
+        subtitle: 'Get status updates for your orders',
+      },
+      {
+        key: 'pushNotifications',
+        title: 'Push notifications',
+        subtitle: 'Allow app notifications on this device',
+      },
+      {
+        key: 'promoEmails',
+        title: 'Promotional emails',
+        subtitle: 'Receive offers and product updates',
+      },
+      {
+        key: 'biometricLock',
+        title: 'Biometric lock',
+        subtitle: 'Require Face ID / fingerprint to open app',
+      },
+      {
+        key: 'showWalletBalance',
+        title: 'Show wallet balance',
+        subtitle: 'Display wallet amount on profile cards',
+      },
+    ];
+
+    return (
+      <Modal
+        visible={showSettingsModal}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setShowSettingsModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Settings</Text>
+              <TouchableOpacity
+                style={styles.modalClose}
+                onPress={() => setShowSettingsModal(false)}
+              >
+                <Ionicons name="close" size={24} color={COLORS.darkNavy} />
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView style={styles.settingsList} showsVerticalScrollIndicator={false}>
+              {settingRows.map((item) => (
+                <View key={item.key} style={styles.settingRow}>
+                  <View style={styles.settingTextBlock}>
+                    <Text style={styles.settingTitle}>{item.title}</Text>
+                    <Text style={styles.settingSubtitle}>{item.subtitle}</Text>
+                  </View>
+                  <Switch
+                    value={settings[item.key]}
+                    onValueChange={(value) =>
+                      setSettings((prev) => ({
+                        ...prev,
+                        [item.key]: value,
+                      }))
+                    }
+                    trackColor={{ false: COLORS.lightGray, true: '#8CCBFF' }}
+                    thumbColor={settings[item.key] ? COLORS.primaryBlue : COLORS.white}
+                  />
+                </View>
+              ))}
+
+              <TouchableOpacity
+                style={styles.settingActionRow}
+                onPress={() => {
+                  setShowSettingsModal(false);
+                  router.push('/(auth)/forgot-password');
+                }}
+              >
+                <View>
+                  <Text style={styles.settingTitle}>Reset password</Text>
+                  <Text style={styles.settingSubtitle}>Send reset instructions to your email</Text>
+                </View>
+                <Ionicons name="chevron-forward" size={18} color={COLORS.gray} />
+              </TouchableOpacity>
+            </ScrollView>
+
+            <Button
+              title={savingSettings ? 'Saving...' : 'Save Settings'}
+              onPress={handleSaveSettings}
+              disabled={savingSettings}
+              style={styles.modalPrimaryButton}
+            />
+          </View>
+        </View>
+      </Modal>
+    );
+  };
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
@@ -592,7 +893,7 @@ export default function Profile() {
         {/* Profile Card */}
         <TouchableOpacity 
           style={styles.profileSection}
-          onPress={() => Alert.alert('Edit Profile', 'Profile editing coming soon')}
+          onPress={() => setShowEditProfileModal(true)}
         >
           <View style={styles.avatar}>
             <Text style={styles.avatarText}>{getUserInitials()}</Text>
@@ -613,7 +914,7 @@ export default function Profile() {
             <View style={[styles.statIcon, { backgroundColor: '#E3F2FD' }]}>
               <Ionicons name="wallet" size={24} color={COLORS.primaryBlue} />
             </View>
-            <Text style={styles.statValue}>${walletBalance.toFixed(2)}</Text>
+            <Text style={styles.statValue}>{walletBalanceDisplay}</Text>
             <Text style={styles.statLabel}>Wallet</Text>
           </TouchableOpacity>
           
@@ -702,6 +1003,8 @@ export default function Profile() {
       {renderWalletModal()}
       {renderTopUpModal()}
       {renderPaymentsModal()}
+      {renderEditProfileModal()}
+      {renderSettingsModal()}
     </SafeAreaView>
   );
 }
@@ -1171,5 +1474,73 @@ const styles = StyleSheet.create({
     marginTop: SPACING.sm,
     fontSize: FONTS.bodySmall,
     color: COLORS.textSecondary,
+  },
+  profileForm: {
+    maxHeight: 380,
+    marginBottom: SPACING.lg,
+  },
+  inputLabel: {
+    fontSize: FONTS.bodySmall,
+    fontWeight: FONTS.semibold,
+    color: COLORS.darkNavy,
+    marginBottom: SPACING.xs,
+    marginTop: SPACING.sm,
+  },
+  profileInput: {
+    borderWidth: 1,
+    borderColor: COLORS.lightGray,
+    borderRadius: RADIUS.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.md,
+    fontSize: FONTS.body,
+    color: COLORS.darkNavy,
+    backgroundColor: COLORS.white,
+  },
+  readOnlyInput: {
+    borderWidth: 1,
+    borderColor: COLORS.lightGray,
+    borderRadius: RADIUS.md,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.md,
+    backgroundColor: COLORS.background,
+  },
+  readOnlyInputText: {
+    fontSize: FONTS.body,
+    color: COLORS.textSecondary,
+  },
+  modalPrimaryButton: {
+    width: '100%',
+  },
+  settingsList: {
+    maxHeight: 420,
+    marginBottom: SPACING.lg,
+  },
+  settingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: SPACING.md,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.lightGray,
+  },
+  settingTextBlock: {
+    flex: 1,
+    paddingRight: SPACING.md,
+  },
+  settingTitle: {
+    fontSize: FONTS.body,
+    color: COLORS.darkNavy,
+    fontWeight: FONTS.semibold,
+  },
+  settingSubtitle: {
+    fontSize: FONTS.caption,
+    color: COLORS.textSecondary,
+    marginTop: 2,
+  },
+  settingActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: SPACING.md,
   },
 });
