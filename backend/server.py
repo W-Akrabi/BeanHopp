@@ -457,6 +457,64 @@ async def create_payment_method_setup_intent(request: PaymentMethodSetupRequest)
         logger.error(f"Error creating payment method setup intent: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@api_router.delete("/payments/methods/{user_id}/{payment_method_id}")
+async def delete_saved_payment_method(
+    user_id: str,
+    payment_method_id: str,
+    email: Optional[str] = None
+):
+    """Detach a saved card payment method from the user's Stripe customer."""
+    try:
+        if not stripe.api_key:
+            raise HTTPException(status_code=503, detail="Stripe is not configured on the server")
+
+        customer = find_stripe_customer(user_id, email=email)
+        if not customer:
+            raise HTTPException(status_code=404, detail="Stripe customer not found")
+
+        customer_id = customer.id
+        payment_method = stripe.PaymentMethod.retrieve(payment_method_id)
+        if payment_method.customer != customer_id:
+            raise HTTPException(status_code=400, detail="Selected payment method does not belong to user")
+
+        default_payment_method_id = (customer.get('invoice_settings') or {}).get('default_payment_method')
+        if default_payment_method_id == payment_method_id:
+            stripe.Customer.modify(
+                customer_id,
+                invoice_settings={"default_payment_method": None}
+            )
+
+        stripe.PaymentMethod.detach(payment_method_id)
+
+        # If the default card was removed, promote another saved card (if one exists).
+        replacement_default_id = None
+        if default_payment_method_id == payment_method_id:
+            remaining_cards = stripe.PaymentMethod.list(
+                customer=customer_id,
+                type='card',
+                limit=1
+            )
+            if remaining_cards.data:
+                replacement_default_id = remaining_cards.data[0].id
+                stripe.Customer.modify(
+                    customer_id,
+                    invoice_settings={"default_payment_method": replacement_default_id}
+                )
+
+        return {
+            "success": True,
+            "deleted_payment_method_id": payment_method_id,
+            "default_payment_method_id": replacement_default_id,
+        }
+    except HTTPException:
+        raise
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error deleting payment method: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error deleting payment method: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @api_router.post("/stripe/pay-with-saved-method")
 async def pay_with_saved_method(request: SavedPaymentChargeRequest):
     """Charge a user's saved card without showing card-entry PaymentSheet."""

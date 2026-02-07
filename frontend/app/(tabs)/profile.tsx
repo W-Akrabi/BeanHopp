@@ -23,7 +23,7 @@ import { useAuthStore } from '../../src/stores/authStore';
 import api from '../../src/lib/api';
 import { useOptionalStripe } from '../../src/lib/stripeCompat';
 import { supabase } from '../../src/lib/supabase';
-import { getPaymentCardTheme } from '../../src/lib/paymentCardTheme';
+import { getPaymentCardTheme, type PaymentCardTheme } from '../../src/lib/paymentCardTheme';
 
 interface FavoriteShop {
   id: string;
@@ -82,6 +82,7 @@ export default function Profile() {
   const [savedPaymentMethods, setSavedPaymentMethods] = useState<SavedPaymentMethod[]>([]);
   const [paymentsLoading, setPaymentsLoading] = useState(false);
   const [addingPaymentMethod, setAddingPaymentMethod] = useState(false);
+  const [deletingPaymentMethodId, setDeletingPaymentMethodId] = useState<string | null>(null);
   const [showWalletModal, setShowWalletModal] = useState(false);
   const [showTopUpModal, setShowTopUpModal] = useState(false);
   const [showPaymentsModal, setShowPaymentsModal] = useState(false);
@@ -392,6 +393,42 @@ export default function Profile() {
     }
   };
 
+  const handleDeletePaymentMethod = (paymentMethodId: string) => {
+    if (!user?.id) {
+      Alert.alert('Sign In Required', 'Please sign in to manage payment methods.');
+      return;
+    }
+
+    Alert.alert(
+      'Remove Payment Method',
+      'Are you sure you want to remove this payment method?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            setDeletingPaymentMethodId(paymentMethodId);
+            try {
+              await api.delete(`/payments/methods/${user.id}/${paymentMethodId}`, {
+                params: {
+                  email: user.email,
+                },
+              });
+
+              setSavedPaymentMethods((prev) => prev.filter((method) => method.id !== paymentMethodId));
+              fetchPaymentMethods();
+            } catch (error: any) {
+              Alert.alert('Delete Failed', error.response?.data?.detail || 'Could not remove payment method.');
+            } finally {
+              setDeletingPaymentMethodId(null);
+            }
+          },
+        },
+      ]
+    );
+  };
+
   const handleSignOut = () => {
     Alert.alert(
       'Sign Out',
@@ -431,6 +468,46 @@ export default function Profile() {
     const month = String(method.exp_month || '--').padStart(2, '0');
     const year = method.exp_year ? String(method.exp_year).slice(-2) : '--';
     return `${month}/${year}`;
+  };
+
+  const renderPaymentCardPattern = (theme: PaymentCardTheme) => {
+    if (theme.pattern === 'diagonal') {
+      return (
+        <>
+          <View style={[styles.patternDiagonalOne, { backgroundColor: theme.accentOne }]} />
+          <View style={[styles.patternDiagonalTwo, { backgroundColor: theme.accentTwo }]} />
+          <View style={[styles.patternDiagonalThree, { backgroundColor: theme.accentThree }]} />
+        </>
+      );
+    }
+
+    if (theme.pattern === 'rings') {
+      return (
+        <>
+          <View style={[styles.patternRingOne, { borderColor: theme.accentOne }]} />
+          <View style={[styles.patternRingTwo, { borderColor: theme.accentTwo }]} />
+          <View style={[styles.patternRingThree, { borderColor: theme.accentThree }]} />
+        </>
+      );
+    }
+
+    if (theme.pattern === 'mesh') {
+      return (
+        <>
+          <View style={[styles.patternMeshPane, { backgroundColor: theme.accentOne }]} />
+          <View style={[styles.patternMeshDot, { backgroundColor: theme.accentTwo }]} />
+          <View style={[styles.patternMeshSweep, { backgroundColor: theme.accentThree }]} />
+        </>
+      );
+    }
+
+    return (
+      <>
+        <View style={[styles.patternAuroraLarge, { backgroundColor: theme.accentOne }]} />
+        <View style={[styles.patternAuroraSmall, { backgroundColor: theme.accentTwo }]} />
+        <View style={[styles.patternAuroraBand, { backgroundColor: theme.accentThree }]} />
+      </>
+    );
   };
 
   const walletBalanceDisplay = settings.showWalletBalance
@@ -680,26 +757,28 @@ export default function Profile() {
                       { backgroundColor: theme.background },
                     ]}
                   >
-                    <View
-                      style={[
-                        styles.paymentCardGlow,
-                        { backgroundColor: theme.accentOne },
-                      ]}
-                    />
-                    <View
-                      style={[
-                        styles.paymentCardGlowSecondary,
-                        { backgroundColor: theme.accentTwo },
-                      ]}
-                    />
+                    {renderPaymentCardPattern(theme)}
 
                     <View style={styles.paymentCardTopRow}>
                       <Text style={styles.paymentCardBrand}>{theme.logoText}</Text>
-                      {method.is_default && (
-                        <View style={styles.paymentCardDefaultBadge}>
-                          <Text style={styles.paymentCardDefaultText}>Default</Text>
-                        </View>
-                      )}
+                      <View style={styles.paymentCardHeaderActions}>
+                        {method.is_default && (
+                          <View style={styles.paymentCardDefaultBadge}>
+                            <Text style={styles.paymentCardDefaultText}>Default</Text>
+                          </View>
+                        )}
+                        <TouchableOpacity
+                          style={styles.paymentCardDeleteButton}
+                          onPress={() => handleDeletePaymentMethod(method.id)}
+                          disabled={deletingPaymentMethodId === method.id}
+                        >
+                          {deletingPaymentMethodId === method.id ? (
+                            <ActivityIndicator size="small" color={COLORS.white} />
+                          ) : (
+                            <Ionicons name="trash-outline" size={16} color={COLORS.white} />
+                          )}
+                        </TouchableOpacity>
+                      </View>
                     </View>
 
                     <View style={styles.paymentCardChipRow}>
@@ -1459,7 +1538,7 @@ const styles = StyleSheet.create({
     minHeight: 196,
     overflow: 'hidden',
   },
-  paymentCardGlow: {
+  patternAuroraLarge: {
     position: 'absolute',
     width: 220,
     height: 220,
@@ -1468,7 +1547,7 @@ const styles = StyleSheet.create({
     left: -35,
     opacity: 0.35,
   },
-  paymentCardGlowSecondary: {
+  patternAuroraSmall: {
     position: 'absolute',
     width: 240,
     height: 240,
@@ -1477,10 +1556,109 @@ const styles = StyleSheet.create({
     right: -60,
     opacity: 0.25,
   },
+  patternAuroraBand: {
+    position: 'absolute',
+    width: '140%',
+    height: 74,
+    left: '-20%',
+    top: 92,
+    opacity: 0.22,
+    transform: [{ rotate: '-10deg' }],
+  },
+  patternDiagonalOne: {
+    position: 'absolute',
+    width: '170%',
+    height: 90,
+    left: '-35%',
+    top: 12,
+    opacity: 0.35,
+    transform: [{ rotate: '-20deg' }],
+  },
+  patternDiagonalTwo: {
+    position: 'absolute',
+    width: '170%',
+    height: 74,
+    left: '-30%',
+    top: 88,
+    opacity: 0.3,
+    transform: [{ rotate: '-20deg' }],
+  },
+  patternDiagonalThree: {
+    position: 'absolute',
+    width: '170%',
+    height: 58,
+    left: '-30%',
+    bottom: -8,
+    opacity: 0.22,
+    transform: [{ rotate: '-20deg' }],
+  },
+  patternRingOne: {
+    position: 'absolute',
+    width: 210,
+    height: 210,
+    borderRadius: 105,
+    borderWidth: 18,
+    right: -95,
+    top: -70,
+    opacity: 0.25,
+  },
+  patternRingTwo: {
+    position: 'absolute',
+    width: 160,
+    height: 160,
+    borderRadius: 80,
+    borderWidth: 14,
+    left: -70,
+    bottom: -60,
+    opacity: 0.22,
+  },
+  patternRingThree: {
+    position: 'absolute',
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    borderWidth: 10,
+    left: '42%',
+    top: 66,
+    opacity: 0.2,
+  },
+  patternMeshPane: {
+    position: 'absolute',
+    width: 210,
+    height: 210,
+    borderRadius: 36,
+    left: -95,
+    top: -82,
+    opacity: 0.24,
+    transform: [{ rotate: '20deg' }],
+  },
+  patternMeshDot: {
+    position: 'absolute',
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    right: -62,
+    top: 40,
+    opacity: 0.25,
+  },
+  patternMeshSweep: {
+    position: 'absolute',
+    width: '130%',
+    height: 72,
+    left: '-12%',
+    bottom: -8,
+    opacity: 0.18,
+    transform: [{ rotate: '7deg' }],
+  },
   paymentCardTopRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+  },
+  paymentCardHeaderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xs,
   },
   paymentCardBrand: {
     color: COLORS.white,
@@ -1498,6 +1676,14 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     fontSize: FONTS.caption,
     fontWeight: FONTS.semibold,
+  },
+  paymentCardDeleteButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.2)',
   },
   paymentCardChipRow: {
     flexDirection: 'row',
