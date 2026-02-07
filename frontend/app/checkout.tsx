@@ -19,6 +19,7 @@ import { useCartStore } from '../src/stores/cartStore';
 import { useAuthStore } from '../src/stores/authStore';
 import api from '../src/lib/api';
 import { useOptionalStripe } from '../src/lib/stripeCompat';
+import { getPaymentCardTheme } from '../src/lib/paymentCardTheme';
 
 interface SavedPaymentMethod {
   id: string;
@@ -447,57 +448,54 @@ export default function Checkout() {
                 </View>
               ) : (
                 <>
-                  {savedPaymentMethods.map((method) => (
-                    <TouchableOpacity
-                      key={method.id}
-                      style={[
-                        styles.paymentOption,
-                        selectedPaymentType === 'saved' &&
-                          selectedSavedMethodId === method.id &&
-                          styles.paymentOptionActive,
-                      ]}
-                      onPress={() => {
-                        setSelectedSavedMethodId(method.id);
-                        setSelectedPaymentType('saved');
-                      }}
-                    >
-                      <View style={styles.paymentOptionLeft}>
-                        <Ionicons
-                          name="card-outline"
-                          size={24}
-                          color={
-                            selectedPaymentType === 'saved' && selectedSavedMethodId === method.id
-                              ? COLORS.primaryBlue
-                              : COLORS.darkNavy
-                          }
-                        />
-                        <View>
-                          <Text style={[
-                            styles.paymentOptionText,
-                            selectedPaymentType === 'saved' &&
-                              selectedSavedMethodId === method.id &&
-                              styles.paymentOptionTextActive,
-                          ]}>
-                            {(method.brand || 'Card').toUpperCase()} •••• {method.last4 || '----'}
-                          </Text>
-                          <Text style={styles.paymentOptionSubtext}>
-                            Expires {String(method.exp_month || '--').padStart(2, '0')}/{method.exp_year || '----'}
-                            {method.is_default ? ' • Default' : ''}
-                          </Text>
+                  {savedPaymentMethods.map((method) => {
+                    const theme = getPaymentCardTheme(method.brand, method.id);
+                    return (
+                      <TouchableOpacity
+                        key={method.id}
+                        style={[
+                          styles.paymentOption,
+                          selectedPaymentType === 'saved' &&
+                            selectedSavedMethodId === method.id &&
+                            styles.paymentOptionActive,
+                        ]}
+                        onPress={() => {
+                          setSelectedSavedMethodId(method.id);
+                          setSelectedPaymentType('saved');
+                        }}
+                      >
+                        <View style={styles.paymentOptionLeft}>
+                          <View style={[styles.savedCardSwatch, { backgroundColor: theme.background }]}>
+                            <Text style={styles.savedCardSwatchLabel}>{theme.logoText}</Text>
+                          </View>
+                          <View>
+                            <Text style={[
+                              styles.paymentOptionText,
+                              selectedPaymentType === 'saved' &&
+                                selectedSavedMethodId === method.id &&
+                                styles.paymentOptionTextActive,
+                            ]}>
+                              {(method.brand || 'Card').toUpperCase()} •••• {method.last4 || '----'}
+                            </Text>
+                            <Text style={styles.paymentOptionSubtext}>
+                              Expires {String(method.exp_month || '--').padStart(2, '0')}/{method.exp_year || '----'}
+                              {method.is_default ? ' • Default' : ''}
+                            </Text>
+                          </View>
                         </View>
-                      </View>
-                      <View style={[
-                        styles.radioButton,
-                        selectedPaymentType === 'saved' &&
-                          selectedSavedMethodId === method.id &&
-                          styles.radioButtonActive,
-                      ]}>
-                        {selectedPaymentType === 'saved' && selectedSavedMethodId === method.id && (
-                          <Ionicons name="checkmark" size={14} color={COLORS.white} />
-                        )}
-                      </View>
-                    </TouchableOpacity>
-                  ))}
+                        <View style={[
+                          styles.radioButton,
+                          selectedPaymentType === 'saved' &&
+                            selectedSavedMethodId === method.id &&
+                            styles.radioButtonActive,
+                        ]}>
+                          {selectedPaymentType === 'saved' && selectedSavedMethodId === method.id && (
+                            <Ionicons name="checkmark" size={14} color={COLORS.white} />
+                          )}
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
 
                   <TouchableOpacity
                     style={[
@@ -571,7 +569,7 @@ export default function Checkout() {
           <View style={styles.pointsBanner}>
             <Ionicons name="star" size={20} color={COLORS.yellow} />
             <Text style={styles.pointsText}>
-              You'll earn {Math.floor(getSubtotal())} points with this order
+              You will earn {Math.floor(getSubtotal())} points with this order
             </Text>
           </View>
 
@@ -806,6 +804,21 @@ const styles = StyleSheet.create({
   paymentOptionLeft: {
     flexDirection: 'row',
     alignItems: 'center',
+  },
+  savedCardSwatch: {
+    width: 44,
+    height: 30,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.24)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  savedCardSwatchLabel: {
+    color: COLORS.white,
+    fontSize: 8,
+    letterSpacing: 1,
+    fontWeight: FONTS.bold,
   },
   paymentOptionText: {
     fontSize: FONTS.body,

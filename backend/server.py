@@ -282,6 +282,11 @@ class SavedPaymentChargeRequest(BaseModel):
     email: Optional[str] = None
     purpose: str = "order"
 
+class SetDefaultPaymentMethodRequest(BaseModel):
+    user_id: str
+    payment_method_id: str
+    email: Optional[str] = None
+
 @api_router.get("/stripe/config")
 async def get_stripe_config():
     """Get Stripe publishable key for frontend"""
@@ -455,6 +460,40 @@ async def create_payment_method_setup_intent(request: PaymentMethodSetupRequest)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error creating payment method setup intent: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/payments/default")
+async def set_default_payment_method(request: SetDefaultPaymentMethodRequest):
+    """Set a user's default saved card payment method."""
+    try:
+        if not stripe.api_key:
+            raise HTTPException(status_code=503, detail="Stripe is not configured on the server")
+
+        customer = find_stripe_customer(request.user_id, email=request.email)
+        if not customer:
+            raise HTTPException(status_code=404, detail="Stripe customer not found")
+
+        customer_id = customer.id
+        payment_method = stripe.PaymentMethod.retrieve(request.payment_method_id)
+        if payment_method.customer != customer_id:
+            raise HTTPException(status_code=400, detail="Selected payment method does not belong to user")
+
+        stripe.Customer.modify(
+            customer_id,
+            invoice_settings={"default_payment_method": request.payment_method_id}
+        )
+
+        return {
+            "success": True,
+            "default_payment_method_id": request.payment_method_id,
+        }
+    except HTTPException:
+        raise
+    except stripe.error.StripeError as e:
+        logger.error(f"Stripe error setting default payment method: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error setting default payment method: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @api_router.delete("/payments/methods/{user_id}/{payment_method_id}")

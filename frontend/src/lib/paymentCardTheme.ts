@@ -4,75 +4,113 @@ export interface PaymentCardTheme {
   accentTwo: string;
   accentThree: string;
   logoText: string;
-  pattern: 'aurora' | 'diagonal' | 'rings' | 'mesh';
+  pattern:
+    | 'prism'
+    | 'ribbons'
+    | 'matrix'
+    | 'sunset'
+    | 'neonframe'
+    | 'topo'
+    | 'chrome'
+    | 'paper'
+    | 'aurora'
+    | 'diagonal'
+    | 'rings'
+    | 'mesh';
 }
 
-const patterns: PaymentCardTheme['pattern'][] = ['aurora', 'diagonal', 'rings', 'mesh'];
-
-const fallbackThemes: Omit<PaymentCardTheme, 'logoText' | 'pattern'>[] = [
-  { background: '#D93B7A', accentOne: '#FF7DB3', accentTwo: '#FFBEDB', accentThree: '#FFD9EA' },
-  { background: '#744BDE', accentOne: '#A083FF', accentTwo: '#D7CCFF', accentThree: '#EAE2FF' },
-  { background: '#2E7D5A', accentOne: '#63C999', accentTwo: '#C4F6DD', accentThree: '#E8FFF3' },
-  { background: '#0F8B8D', accentOne: '#48C9C9', accentTwo: '#A9F1EE', accentThree: '#D8FFFA' },
+const designSet: PaymentCardTheme[] = [
+  {
+    background: '#4A3FA8',
+    accentOne: '#8B83E8',
+    accentTwo: '#6E63CC',
+    accentThree: '#C5BEFF',
+    logoText: 'PRISM',
+    pattern: 'prism',
+  },
+  {
+    background: '#1B2534',
+    accentOne: '#6D7681',
+    accentTwo: '#394352',
+    accentThree: '#A3ADB8',
+    logoText: 'RIBBON',
+    pattern: 'ribbons',
+  },
+  {
+    background: '#1A6A4F',
+    accentOne: '#2E8A65',
+    accentTwo: '#4CA77F',
+    accentThree: '#8FD4B5',
+    logoText: 'MATRIX',
+    pattern: 'matrix',
+  },
+  {
+    background: '#D75885',
+    accentOne: '#FF8AA9',
+    accentTwo: '#FF5E8D',
+    accentThree: '#CF82DB',
+    logoText: 'SUNSET',
+    pattern: 'sunset',
+  },
+  {
+    background: '#2F4F8B',
+    accentOne: '#7095D8',
+    accentTwo: '#4F73B2',
+    accentThree: '#A8C5FF',
+    logoText: 'NEON',
+    pattern: 'neonframe',
+  },
+  {
+    background: '#2B3D6A',
+    accentOne: '#4F638F',
+    accentTwo: '#3B4F78',
+    accentThree: '#8CA4D6',
+    logoText: 'TOPO',
+    pattern: 'topo',
+  },
+  {
+    background: '#171B24',
+    accentOne: '#3A4256',
+    accentTwo: '#252C3B',
+    accentThree: '#6A7591',
+    logoText: 'CHROME',
+    pattern: 'chrome',
+  },
+  {
+    background: '#2D3447',
+    accentOne: '#454F66',
+    accentTwo: '#394257',
+    accentThree: '#7782A1',
+    logoText: 'PAPER',
+    pattern: 'paper',
+  },
 ];
 
-const visaThemes: Omit<PaymentCardTheme, 'logoText' | 'pattern'>[] = [
-  { background: '#2B4EFF', accentOne: '#6F8BFF', accentTwo: '#A6B8FF', accentThree: '#D5DEFF' },
-  { background: '#1C2EB8', accentOne: '#4A6CFF', accentTwo: '#88A2FF', accentThree: '#BDCCFF' },
-];
-
-const mastercardThemes: Omit<PaymentCardTheme, 'logoText' | 'pattern'>[] = [
-  { background: '#1E1E1E', accentOne: '#FF6A3D', accentTwo: '#FFC14D', accentThree: '#FFE2AD' },
-  { background: '#2E0F0F', accentOne: '#FF8B66', accentTwo: '#FFD081', accentThree: '#FFE7B8' },
-];
-
-const amexThemes: Omit<PaymentCardTheme, 'logoText' | 'pattern'>[] = [
-  { background: '#0F8B8D', accentOne: '#3CCFCF', accentTwo: '#9CF8E8', accentThree: '#D6FFF7' },
-  { background: '#0B5F8B', accentOne: '#49B9FF', accentTwo: '#9CDBFF', accentThree: '#D8F1FF' },
-];
-
-function pickTheme(
-  pool: Omit<PaymentCardTheme, 'logoText' | 'pattern'>[],
-  index: number
-): Omit<PaymentCardTheme, 'logoText' | 'pattern'> {
-  return pool[index % pool.length];
+function stableHash(input: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
 }
 
-export function getPaymentCardTheme(brand: string | null, index: number): PaymentCardTheme {
-  const normalized = (brand || '').toLowerCase();
-  const pattern = patterns[index % patterns.length];
-
-  if (normalized === 'visa') {
-    const palette = pickTheme(visaThemes, index);
-    return {
-      ...palette,
-      logoText: 'VISA',
-      pattern,
-    };
+function getStableDesignIndex(stableKey?: string | number | null): number {
+  if (typeof stableKey === 'number' && Number.isFinite(stableKey)) {
+    return Math.abs(Math.floor(stableKey)) % designSet.length;
   }
 
-  if (normalized === 'mastercard') {
-    const palette = pickTheme(mastercardThemes, index);
-    return {
-      ...palette,
-      logoText: 'MASTERCARD',
-      pattern,
-    };
+  const key = String(stableKey || '').trim();
+  if (key.length > 0) {
+    return stableHash(key) % designSet.length;
   }
 
-  if (normalized === 'amex') {
-    const palette = pickTheme(amexThemes, index);
-    return {
-      ...palette,
-      logoText: 'AMEX',
-      pattern,
-    };
-  }
+  return 0;
+}
 
-  const palette = pickTheme(fallbackThemes, index);
-  return {
-    ...palette,
-    logoText: 'CARD',
-    pattern,
-  };
+export function getPaymentCardTheme(
+  _brand: string | null,
+  stableKey?: string | number | null
+): PaymentCardTheme {
+  return designSet[getStableDesignIndex(stableKey)];
 }

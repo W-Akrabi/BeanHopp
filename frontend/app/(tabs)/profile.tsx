@@ -471,7 +471,7 @@ export default function Profile() {
   };
 
   const renderPaymentCardPattern = (theme: PaymentCardTheme) => {
-    if (theme.pattern === 'diagonal') {
+    if (theme.pattern === 'ribbons' || theme.pattern === 'diagonal') {
       return (
         <>
           <View style={[styles.patternDiagonalOne, { backgroundColor: theme.accentOne }]} />
@@ -481,7 +481,11 @@ export default function Profile() {
       );
     }
 
-    if (theme.pattern === 'rings') {
+    if (
+      theme.pattern === 'topo' ||
+      theme.pattern === 'chrome' ||
+      theme.pattern === 'rings'
+    ) {
       return (
         <>
           <View style={[styles.patternRingOne, { borderColor: theme.accentOne }]} />
@@ -491,7 +495,7 @@ export default function Profile() {
       );
     }
 
-    if (theme.pattern === 'mesh') {
+    if (theme.pattern === 'matrix' || theme.pattern === 'paper' || theme.pattern === 'mesh') {
       return (
         <>
           <View style={[styles.patternMeshPane, { backgroundColor: theme.accentOne }]} />
@@ -527,10 +531,7 @@ export default function Profile() {
       subtitle: savedPaymentMethods.length > 0
         ? `${savedPaymentMethods.length} saved payment method${savedPaymentMethods.length > 1 ? 's' : ''}`
         : 'No saved payment methods',
-      onPress: () => {
-        setShowPaymentsModal(true);
-        fetchPaymentMethods();
-      },
+      onPress: () => router.push('/payments'),
     },
     {
       icon: 'settings-outline',
@@ -747,8 +748,8 @@ export default function Profile() {
             </View>
           ) : savedPaymentMethods.length > 0 ? (
             <ScrollView style={styles.paymentMethodsList} showsVerticalScrollIndicator={false}>
-              {savedPaymentMethods.map((method, index) => {
-                const theme = getPaymentCardTheme(method.brand, index);
+              {savedPaymentMethods.map((method) => {
+                const theme = getPaymentCardTheme(method.brand, method.id);
                 return (
                   <View
                     key={method.id}
