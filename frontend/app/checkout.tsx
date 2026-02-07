@@ -30,11 +30,28 @@ interface SavedPaymentMethod {
   is_default: boolean;
 }
 
+interface RewardVoucher {
+  id: string;
+  reward_type: string;
+  code: string;
+  status: string;
+  expires_at: string;
+  created_at: string;
+}
+
+interface AppliedVoucher {
+  voucher_id: string;
+  voucher_code: string;
+  reward_type: string;
+  discount_amount: number;
+}
+
 type CheckoutPaymentSelection = 'wallet' | 'saved' | 'new';
+const TAX_RATE = 0.13;
 
 export default function Checkout() {
   const router = useRouter();
-  const { items, shopId, shopName, getSubtotal, getTax, getTotal, clearCart } = useCartStore();
+  const { items, shopId, shopName, getSubtotal, clearCart } = useCartStore();
   const user = useAuthStore((state) => state.user);
   const stripe = useOptionalStripe();
   const { initPaymentSheet, presentPaymentSheet } = stripe;
@@ -45,12 +62,21 @@ export default function Checkout() {
   const [pickupTime, setPickupTime] = useState<'asap' | '15min' | '30min'>('asap');
   const [walletBalance, setWalletBalance] = useState(0);
   const [savedPaymentMethods, setSavedPaymentMethods] = useState<SavedPaymentMethod[]>([]);
+  const [activeVouchers, setActiveVouchers] = useState<RewardVoucher[]>([]);
   const [paymentsLoading, setPaymentsLoading] = useState(false);
+  const [vouchersLoading, setVouchersLoading] = useState(false);
+  const [applyingVoucher, setApplyingVoucher] = useState(false);
   const [selectedPaymentType, setSelectedPaymentType] = useState<CheckoutPaymentSelection>('new');
   const [selectedSavedMethodId, setSelectedSavedMethodId] = useState<string | null>(null);
   const [saveNewPaymentMethod, setSaveNewPaymentMethod] = useState(true);
+  const [selectedVoucherId, setSelectedVoucherId] = useState<string | null>(null);
+  const [appliedVoucher, setAppliedVoucher] = useState<AppliedVoucher | null>(null);
 
-  const total = getTotal();
+  const subtotal = getSubtotal();
+  const effectiveDiscount = Math.min(subtotal, appliedVoucher?.discount_amount || 0);
+  const discountedSubtotal = Math.max(0, subtotal - effectiveDiscount);
+  const discountedTax = Number((discountedSubtotal * TAX_RATE).toFixed(2));
+  const total = Number((discountedSubtotal + discountedTax).toFixed(2));
   const applePayMerchantIdentifier = process.env.EXPO_PUBLIC_APPLE_PAY_MERCHANT_ID || '';
   const canUseWallet = walletBalance >= total;
   const selectedSavedMethod = savedPaymentMethods.find((pm) => pm.id === selectedSavedMethodId) || null;
@@ -61,24 +87,43 @@ export default function Checkout() {
     }
   }, [user?.id]);
 
+  useEffect(() => {
+    if (!appliedVoucher) {
+      return;
+    }
+    if (subtotal <= 0) {
+      setSelectedVoucherId(null);
+      setAppliedVoucher(null);
+    }
+  }, [subtotal, appliedVoucher]);
+
   const fetchPaymentContext = async () => {
     if (!user?.id) {
       return;
     }
 
     setPaymentsLoading(true);
+    setVouchersLoading(true);
     try {
-      const [walletResponse, methodsResponse] = await Promise.all([
+      const [walletResponse, methodsResponse, vouchersResponse] = await Promise.all([
         api.get(`/wallet/${user.id}`),
         api.get(`/payments/methods/${user.id}`, {
           params: { email: user.email },
         }),
+        api.get(`/rewards/${user.id}/vouchers`),
       ]);
 
       const nextWalletBalance = walletResponse.data.balance || 0;
       const methods: SavedPaymentMethod[] = methodsResponse.data.payment_methods || [];
+      const vouchers: RewardVoucher[] = vouchersResponse.data || [];
       setWalletBalance(nextWalletBalance);
       setSavedPaymentMethods(methods);
+      setActiveVouchers(vouchers);
+
+      if (selectedVoucherId && !vouchers.some((voucher) => voucher.id === selectedVoucherId)) {
+        setSelectedVoucherId(null);
+        setAppliedVoucher(null);
+      }
 
       if (methods.length > 0) {
         const defaultMethod = methods.find((pm) => pm.is_default) || methods[0];
@@ -93,6 +138,7 @@ export default function Checkout() {
       console.log('Error fetching checkout payment context:', error);
     } finally {
       setPaymentsLoading(false);
+      setVouchersLoading(false);
     }
   };
 
@@ -104,9 +150,72 @@ export default function Checkout() {
       ? { merchantCountryCode: 'CA' }
       : undefined,
     googlePay: Platform.OS === 'android'
-      ? { merchantCountryCode: 'CA', testEnv: __DEV__ }
-      : undefined,
+        ? { merchantCountryCode: 'CA', testEnv: __DEV__ }
+        : undefined,
   });
+
+  const getVoucherTitle = (rewardType: string) => {
+    if (rewardType === 'free_drink') {
+      return 'Free Drink';
+    }
+    if (rewardType === 'size_upgrade') {
+      return 'Size Upgrade';
+    }
+    if (rewardType === 'free_pastry') {
+      return 'Free Pastry';
+    }
+    return 'Reward Voucher';
+  };
+
+  const getVoucherIcon = (rewardType: string) => {
+    if (rewardType === 'free_drink') {
+      return 'cafe-outline';
+    }
+    if (rewardType === 'size_upgrade') {
+      return 'resize-outline';
+    }
+    if (rewardType === 'free_pastry') {
+      return 'pizza-outline';
+    }
+    return 'ticket-outline';
+  };
+
+  const handleApplyVoucher = async (voucher: RewardVoucher) => {
+    if (!user?.id) {
+      return;
+    }
+
+    setApplyingVoucher(true);
+    try {
+      const response = await api.post('/rewards/apply-voucher', {
+        user_id: user.id,
+        subtotal,
+        tax_rate: TAX_RATE,
+        voucher_id: voucher.id,
+      });
+
+      const result = response.data;
+      setSelectedVoucherId(voucher.id);
+      setAppliedVoucher({
+        voucher_id: result.voucher_id,
+        voucher_code: result.voucher_code,
+        reward_type: result.reward_type,
+        discount_amount: result.discount_amount,
+      });
+      Alert.alert('Voucher Applied', `${getVoucherTitle(voucher.reward_type)} has been applied to this order.`);
+    } catch (error: any) {
+      Alert.alert('Voucher Error', error.response?.data?.detail || 'Could not apply this voucher.');
+      setSelectedVoucherId(null);
+      setAppliedVoucher(null);
+    } finally {
+      setApplyingVoucher(false);
+    }
+  };
+
+  const handleRemoveVoucher = () => {
+    setSelectedVoucherId(null);
+    setAppliedVoucher(null);
+  };
 
   const handlePlaceOrder = async () => {
     if (!user) {
@@ -122,17 +231,19 @@ export default function Checkout() {
       return;
     }
 
-    if (selectedPaymentType === 'wallet' && !canUseWallet) {
+    const isFreeOrder = total <= 0;
+
+    if (!isFreeOrder && selectedPaymentType === 'wallet' && !canUseWallet) {
       Alert.alert('Insufficient Wallet Balance', 'Please add funds or choose card payment.');
       return;
     }
 
-    if (selectedPaymentType === 'saved' && !selectedSavedMethodId) {
+    if (!isFreeOrder && selectedPaymentType === 'saved' && !selectedSavedMethodId) {
       Alert.alert('Select Payment Method', 'Please select a saved card or choose Add new payment method.');
       return;
     }
 
-    const usingNewCardPayment = selectedPaymentType === 'new';
+    const usingNewCardPayment = !isFreeOrder && selectedPaymentType === 'new';
     if (usingNewCardPayment) {
       if (Platform.OS === 'web') {
         Alert.alert('Unsupported', 'Checkout payment is available on iOS/Android only.');
@@ -162,9 +273,10 @@ export default function Checkout() {
           quantity: item.quantity,
           customizations: item.customizations,
         })),
-        subtotal: getSubtotal(),
-        tax: getTax(),
+        subtotal: discountedSubtotal,
+        tax: discountedTax,
         total,
+        discount: effectiveDiscount,
         special_instructions: specialInstructions,
         pickup_time: pickupTime,
       };
@@ -173,7 +285,10 @@ export default function Checkout() {
       const order = orderResponse.data;
       createdOrderId = order.id;
 
-      if (selectedPaymentType === 'wallet') {
+      if (isFreeOrder) {
+        await api.patch(`/orders/${order.id}/status?status=confirmed`);
+        orderConfirmed = true;
+      } else if (selectedPaymentType === 'wallet') {
         await api.post('/wallet/pay', null, {
           params: {
             user_id: user.id,
@@ -197,7 +312,6 @@ export default function Checkout() {
         const { paymentIntentId } = savedPaymentResponse.data;
         await api.post(`/stripe/confirm-payment?payment_intent_id=${paymentIntentId}&order_id=${order.id}`);
         orderConfirmed = true;
-        await fetchPaymentContext();
       } else {
         // Step 2: Create payment intent for this order
         const paymentResponse = await api.post('/stripe/create-payment-intent', {
@@ -234,8 +348,23 @@ export default function Checkout() {
 
         await api.post(`/stripe/confirm-payment?payment_intent_id=${paymentIntentId}&order_id=${order.id}`);
         orderConfirmed = true;
-        await fetchPaymentContext();
       }
+
+      if (appliedVoucher?.voucher_id) {
+        try {
+          await api.post('/rewards/use-voucher', {
+            user_id: user.id,
+            voucher_id: appliedVoucher.voucher_id,
+            order_id: order.id,
+          });
+          setAppliedVoucher(null);
+          setSelectedVoucherId(null);
+        } catch (voucherError) {
+          console.log('Voucher usage update failed:', voucherError);
+        }
+      }
+
+      await fetchPaymentContext();
 
       // Step 4: Clear cart and navigate to order
       clearCart();
@@ -387,6 +516,64 @@ export default function Checkout() {
               numberOfLines={3}
               containerStyle={styles.instructionsInput}
             />
+          </View>
+
+          {/* Vouchers */}
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Vouchers</Text>
+            <View style={styles.voucherCard}>
+              {vouchersLoading ? (
+                <View style={styles.voucherLoadingRow}>
+                  <ActivityIndicator size="small" color={COLORS.primaryBlue} />
+                  <Text style={styles.voucherLoadingText}>Loading vouchers...</Text>
+                </View>
+              ) : activeVouchers.length > 0 ? (
+                <>
+                  {activeVouchers.map((voucher) => {
+                    const isApplied = selectedVoucherId === voucher.id && Boolean(appliedVoucher);
+                    return (
+                      <TouchableOpacity
+                        key={voucher.id}
+                        style={[styles.voucherOption, isApplied && styles.voucherOptionApplied]}
+                        onPress={() => {
+                          if (isApplied) {
+                            handleRemoveVoucher();
+                            return;
+                          }
+                          handleApplyVoucher(voucher);
+                        }}
+                        disabled={applyingVoucher}
+                      >
+                        <View style={styles.voucherOptionLeft}>
+                          <Ionicons
+                            name={getVoucherIcon(voucher.reward_type) as any}
+                            size={20}
+                            color={isApplied ? COLORS.primaryBlue : COLORS.darkNavy}
+                          />
+                          <View style={styles.voucherOptionTextWrap}>
+                            <Text style={[styles.voucherOptionTitle, isApplied && styles.voucherOptionTitleApplied]}>
+                              {getVoucherTitle(voucher.reward_type)}
+                            </Text>
+                            <Text style={styles.voucherOptionCode}>
+                              {voucher.code} • Expires {new Date(voucher.expires_at).toLocaleDateString()}
+                            </Text>
+                          </View>
+                        </View>
+                        {isApplied ? (
+                          <View style={styles.voucherAppliedBadge}>
+                            <Text style={styles.voucherAppliedBadgeText}>Applied</Text>
+                          </View>
+                        ) : (
+                          <Ionicons name="add-circle-outline" size={20} color={COLORS.primaryBlue} />
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </>
+              ) : (
+                <Text style={styles.noVouchersText}>No active vouchers yet. Redeem beans in Rewards tab.</Text>
+              )}
+            </View>
           </View>
 
           {/* Payment Method */}
@@ -552,11 +739,17 @@ export default function Checkout() {
             <View style={styles.summaryCard}>
               <View style={styles.summaryRow}>
                 <Text style={styles.summaryLabel}>Subtotal</Text>
-                <Text style={styles.summaryValue}>${getSubtotal().toFixed(2)}</Text>
+                <Text style={styles.summaryValue}>${subtotal.toFixed(2)}</Text>
               </View>
+              {effectiveDiscount > 0 && (
+                <View style={styles.summaryRow}>
+                  <Text style={styles.discountLabel}>Voucher Discount</Text>
+                  <Text style={styles.discountValue}>-${effectiveDiscount.toFixed(2)}</Text>
+                </View>
+              )}
               <View style={styles.summaryRow}>
                 <Text style={styles.summaryLabel}>Tax (13%)</Text>
-                <Text style={styles.summaryValue}>${getTax().toFixed(2)}</Text>
+                <Text style={styles.summaryValue}>${discountedTax.toFixed(2)}</Text>
               </View>
               <View style={[styles.summaryRow, styles.totalRow]}>
                 <Text style={styles.totalLabel}>Total</Text>
@@ -569,7 +762,7 @@ export default function Checkout() {
           <View style={styles.pointsBanner}>
             <Ionicons name="star" size={20} color={COLORS.yellow} />
             <Text style={styles.pointsText}>
-              You will earn {Math.floor(getSubtotal())} points with this order
+              You will earn {Math.floor(discountedSubtotal)} points with this order
             </Text>
           </View>
 
@@ -577,7 +770,9 @@ export default function Checkout() {
           <View style={styles.secureBadge}>
             <Ionicons name="lock-closed" size={16} color={COLORS.green} />
             <Text style={styles.secureText}>
-              {selectedPaymentType === 'wallet'
+              {total <= 0
+                ? 'Voucher covers this order. No payment needed.'
+                : selectedPaymentType === 'wallet'
                 ? 'Paying with your BeanHop wallet balance'
                 : 'Secure card payment powered by Stripe'}
             </Text>
@@ -588,7 +783,9 @@ export default function Checkout() {
         <View style={styles.bottomBar}>
           <Button
             title={
-              selectedPaymentType === 'wallet'
+              total <= 0
+                ? 'Place Free Order'
+                : selectedPaymentType === 'wallet'
                 ? `Pay $${total.toFixed(2)} with Wallet`
                 : selectedPaymentType === 'saved' && selectedSavedMethod
                   ? `Pay $${total.toFixed(2)} with ${String(selectedSavedMethod.brand || 'CARD').toUpperCase()}`
@@ -596,6 +793,7 @@ export default function Checkout() {
             }
             onPress={handlePlaceOrder}
             loading={loading}
+            disabled={loading || applyingVoucher}
             size="large"
             style={styles.placeOrderButton}
           />
@@ -782,6 +980,70 @@ const styles = StyleSheet.create({
   instructionsInput: {
     marginBottom: 0,
   },
+  voucherCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: RADIUS.lg,
+    ...SHADOWS.small,
+  },
+  voucherLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: SPACING.md,
+  },
+  voucherLoadingText: {
+    marginLeft: SPACING.sm,
+    color: COLORS.textSecondary,
+    fontSize: FONTS.bodySmall,
+  },
+  voucherOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: SPACING.md,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.lightGray,
+  },
+  voucherOptionApplied: {
+    backgroundColor: '#E3F2FD',
+  },
+  voucherOptionLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  voucherOptionTextWrap: {
+    marginLeft: SPACING.sm,
+    flex: 1,
+  },
+  voucherOptionTitle: {
+    fontSize: FONTS.body,
+    color: COLORS.darkNavy,
+    fontWeight: FONTS.semibold,
+  },
+  voucherOptionTitleApplied: {
+    color: COLORS.primaryBlue,
+  },
+  voucherOptionCode: {
+    marginTop: 2,
+    fontSize: FONTS.caption,
+    color: COLORS.textSecondary,
+  },
+  voucherAppliedBadge: {
+    backgroundColor: '#BBD7FF',
+    borderRadius: RADIUS.full,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 4,
+  },
+  voucherAppliedBadgeText: {
+    color: COLORS.primaryBlue,
+    fontSize: FONTS.caption,
+    fontWeight: FONTS.semibold,
+  },
+  noVouchersText: {
+    padding: SPACING.md,
+    fontSize: FONTS.bodySmall,
+    color: COLORS.textSecondary,
+  },
   paymentMethods: {
     backgroundColor: COLORS.white,
     borderRadius: RADIUS.lg,
@@ -914,6 +1176,15 @@ const styles = StyleSheet.create({
   summaryValue: {
     fontSize: FONTS.body,
     color: COLORS.darkNavy,
+  },
+  discountLabel: {
+    fontSize: FONTS.body,
+    color: COLORS.green,
+  },
+  discountValue: {
+    fontSize: FONTS.body,
+    color: COLORS.green,
+    fontWeight: FONTS.semibold,
   },
   totalRow: {
     borderTopWidth: 1,

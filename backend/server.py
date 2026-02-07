@@ -10,7 +10,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import stripe
 
 ROOT_DIR = Path(__file__).parent
@@ -103,6 +103,7 @@ class OrderCreate(BaseModel):
     subtotal: float
     tax: float
     total: float
+    discount: float = 0.0
     pickup_time: Optional[str] = None
     special_instructions: Optional[str] = None
 
@@ -663,7 +664,7 @@ async def create_order(order_data: OrderCreate):
         order_dict['shop_name'] = shop_name
         order_dict['status'] = 'pending'
         order_dict['points_earned'] = points_earned
-        order_dict['discount'] = 0.0
+        order_dict['discount'] = order_data.discount
         order_dict['created_at'] = datetime.utcnow().isoformat()
         order_dict['updated_at'] = datetime.utcnow().isoformat()
         
@@ -757,6 +758,36 @@ class RedeemRewardRequest(BaseModel):
     user_id: str
     reward_type: str  # 'free_drink', 'size_upgrade', 'free_pastry'
     points_cost: int
+
+class ApplyRewardVoucherRequest(BaseModel):
+    user_id: str
+    subtotal: float
+    tax_rate: float = 0.13
+    voucher_id: Optional[str] = None
+    voucher_code: Optional[str] = None
+
+class UseRewardVoucherRequest(BaseModel):
+    user_id: str
+    voucher_id: str
+    order_id: Optional[str] = None
+
+REWARD_DISCOUNT_VALUES = {
+    'free_drink': 6.00,
+    'size_upgrade': 1.00,
+    'free_pastry': 3.50,
+}
+
+def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except Exception:
+        return None
 
 @api_router.get("/wallet/{user_id}")
 async def get_wallet(user_id: str):
@@ -971,6 +1002,103 @@ async def pay_with_wallet(user_id: str, amount: float, order_id: Optional[str] =
         raise HTTPException(status_code=500, detail=str(e))
 
 # ------------ Rewards Redemption ------------
+
+@api_router.post("/rewards/apply-voucher")
+async def apply_reward_voucher(request: ApplyRewardVoucherRequest):
+    """Validate a voucher and return discounted checkout totals."""
+    try:
+        if request.subtotal <= 0:
+            raise HTTPException(status_code=400, detail="Subtotal must be greater than 0")
+
+        if not request.voucher_id and not request.voucher_code:
+            raise HTTPException(status_code=400, detail="Voucher id or code is required")
+
+        query = supabase.table('reward_vouchers').select('*').eq('user_id', request.user_id).eq('status', 'active')
+        if request.voucher_id:
+            query = query.eq('id', request.voucher_id)
+        else:
+            query = query.eq('code', request.voucher_code)
+
+        voucher_response = query.limit(1).execute()
+        if not voucher_response.data:
+            raise HTTPException(status_code=404, detail="Voucher not found or inactive")
+
+        voucher = voucher_response.data[0]
+        expires_at = parse_iso_datetime(voucher.get('expires_at'))
+        if expires_at and expires_at < datetime.utcnow():
+            supabase.table('reward_vouchers').update({
+                'status': 'expired',
+            }).eq('id', voucher['id']).execute()
+            raise HTTPException(status_code=400, detail="Voucher has expired")
+
+        reward_type = voucher.get('reward_type')
+        discount_value = REWARD_DISCOUNT_VALUES.get(reward_type)
+        if discount_value is None:
+            raise HTTPException(status_code=400, detail="Voucher reward type is unsupported")
+
+        discount_amount = min(float(request.subtotal), float(discount_value))
+        discounted_subtotal = max(0.0, float(request.subtotal) - discount_amount)
+        tax_rate = max(0.0, float(request.tax_rate))
+        tax = round(discounted_subtotal * tax_rate, 2)
+        total = round(discounted_subtotal + tax, 2)
+
+        return {
+            "success": True,
+            "voucher_id": voucher['id'],
+            "voucher_code": voucher.get('code'),
+            "reward_type": reward_type,
+            "discount_amount": round(discount_amount, 2),
+            "discounted_subtotal": round(discounted_subtotal, 2),
+            "tax": tax,
+            "total": total,
+            "tax_rate": tax_rate,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error applying reward voucher: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/rewards/use-voucher")
+async def use_reward_voucher(request: UseRewardVoucherRequest):
+    """Mark an active voucher as used after successful checkout."""
+    try:
+        voucher_response = (
+            supabase.table('reward_vouchers')
+            .select('*')
+            .eq('id', request.voucher_id)
+            .eq('user_id', request.user_id)
+            .eq('status', 'active')
+            .limit(1)
+            .execute()
+        )
+
+        if not voucher_response.data:
+            raise HTTPException(status_code=404, detail="Active voucher not found")
+
+        voucher = voucher_response.data[0]
+        expires_at = parse_iso_datetime(voucher.get('expires_at'))
+        if expires_at and expires_at < datetime.utcnow():
+            supabase.table('reward_vouchers').update({
+                'status': 'expired',
+            }).eq('id', request.voucher_id).execute()
+            raise HTTPException(status_code=400, detail="Voucher has expired")
+
+        supabase.table('reward_vouchers').update({
+            'status': 'used',
+        }).eq('id', request.voucher_id).execute()
+
+        return {
+            "success": True,
+            "voucher_id": request.voucher_id,
+            "status": "used",
+            "order_id": request.order_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error using voucher: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @api_router.post("/rewards/redeem")
 async def redeem_reward(request: RedeemRewardRequest):
